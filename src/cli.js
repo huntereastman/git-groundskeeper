@@ -67,6 +67,7 @@ function parseArgs(argv) {
     largeFileBytes: 10 * 1024 * 1024,
     untrackedFiles: 'normal',
     buckets: false,
+    commands: false,
     sizes: false,
     squashDetect: true,
     owners: [],
@@ -99,6 +100,9 @@ function parseArgs(argv) {
       options.untrackedFiles = 'all';
     } else if (arg === '--buckets') {
       options.buckets = true;
+    } else if (arg === '--commands') {
+      options.buckets = true;
+      options.commands = true;
     } else if (arg === '--sizes') {
       options.sizes = true;
     } else if (arg === '--no-squash-detect') {
@@ -207,6 +211,9 @@ Options:
                          wide scans; the default collapses them per directory.
   --buckets              List worktrees grouped by what removing them costs:
                          worktree + branch, worktree only, blocked, primary.
+  --commands             Print the removal commands for the safe buckets, so
+                         git re-checks each one. Implies --buckets. Never
+                         emits --force or -D.
   --sizes                Measure each worktree on disk so buckets can total
                          what they reclaim. Adds a du walk per worktree.
   --no-squash-detect     Skip squash-merge detection, which synthesises a

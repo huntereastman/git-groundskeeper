@@ -97,6 +97,36 @@ test('sizes are base 10, matching the free space macOS reports', () => {
   assert.doesNotMatch(text, /0\.9GB/);
 });
 
+test('emitted commands never force, so git gets to disagree', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+
+  // A path with a space, as in "4 Pillars".
+  report.repos[0].primaryPath = '/workspace/4 Pillars/app';
+  worktrees[0].tier = 'blocked';
+  worktrees[1].tier = 'worktree-only';
+  worktrees[2].tier = 'worktree-and-branch';
+
+  const text = formatScanText(report, { commands: true, buckets: true, all: true });
+
+  // Assert on the commands themselves, not the prose around them: the header
+  // reads "none use --force", so scanning the whole blob tests the paragraph
+  // rather than the behaviour.
+  const commands = text.split('\n').filter((line) => line.startsWith('git '));
+
+  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
+  // Paths with spaces must survive being pasted into a shell.
+  assert.ok(commands.every((line) => line.startsWith("git -C '/workspace/4 Pillars/app'")));
+  // Only the merged tier retires a branch, and only ever with -d.
+  assert.ok(commands.some((line) => line.includes("branch -d 'feature/done'")));
+  // Force would remove git's independent check, which is the only part of this
+  // that does not depend on the tool being right.
+  assert.equal(commands.some((line) => line.includes('--force')), false);
+  assert.equal(commands.some((line) => line.includes('branch -D')), false);
+  // Nothing is proposed for the bucket that would lose work.
+  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app'")), false);
+});
+
 test('buckets list the worktrees in each tier, not just a count', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;

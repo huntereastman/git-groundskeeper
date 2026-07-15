@@ -161,8 +161,8 @@ export async function scanRoots(roots, options = {}) {
     repo.worktreePathsSorted.map((worktreePath) => ({ repo, worktreePath })),
   );
 
-  const scannedWorktrees = await mapWithConcurrency(worktreeJobs, concurrency, ({ worktreePath }) =>
-    scanWorktree(worktreePath, options),
+  const scannedWorktrees = await mapWithConcurrency(worktreeJobs, concurrency, ({ repo, worktreePath }) =>
+    scanWorktree(worktreePath, options, repo.primaryPath),
   );
 
   const worktreesByRepo = new Map(selectedRepos.map((repo) => [repo, []]));
@@ -272,7 +272,7 @@ function pickPrimaryPath(discoveryRoots, worktreePathsInGitOrder, sortedWorktree
   return sortedWorktreePaths.find((worktreePath) => !isGitStoragePath(worktreePath)) ?? discoveryRoots[0];
 }
 
-async function scanWorktree(worktreePath, options) {
+async function scanWorktree(worktreePath, options, primaryPath) {
   const branch = await getCurrentBranch(worktreePath);
   const head = (await git(worktreePath, ['rev-parse', '--short', 'HEAD'])).stdout.trim();
   const statusEntries = await listStatusEntries(worktreePath, options);
@@ -293,7 +293,7 @@ async function scanWorktree(worktreePath, options) {
   const dirty = statusEntries.length > 0;
   // Only clean worktrees can be proposed for removal, so they are the only ones
   // whose hidden files matter. This keeps the extra call off the majority.
-  const preciousIgnored = dirty ? [] : await listPreciousIgnored(worktreePath);
+  const preciousIgnored = dirty ? [] : await listPreciousIgnored(worktreePath, primaryPath);
 
   return {
     path: worktreePath,
@@ -450,12 +450,20 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
 
     if (!mergedInto) continue;
 
+    // Whether `git branch -d` will accept this is a separate question from how
+    // the merge was proven: -d consults ancestry and nothing else. A pull
+    // request can confirm a merge that ancestry cannot see, so this has to be
+    // asked directly or the warning lands on every row and means nothing.
+    const ancestryVisible = await isAncestor(cwd, worktree.branch, mergedInto);
+
     worktree.cleanupStatus = 'prune-candidate';
     worktree.mergedInto = mergedInto;
     worktree.mergedVia = mergedVia;
+    worktree.ancestryVisible = ancestryVisible;
     branch.cleanupStatus = 'prune-candidate';
     branch.mergedInto = mergedInto;
     branch.mergedVia = mergedVia;
+    branch.ancestryVisible = ancestryVisible;
   }
 }
 
@@ -692,15 +700,31 @@ export function parseRemoteOwner(url) {
 
 // Files git is told to ignore are invisible to `git status`, so a worktree can
 // report perfectly clean while holding the only copy of something you need.
-// These are not dirty and must not block cleanup -- most are duplicates across
-// worktrees -- but a delete list that never mentions them is lying by omission.
-const PRECIOUS_IGNORED = [
-  /(^|\/)\.env($|\.)/,
-  /(^|\/)[^/]*\.local$/,
-  /(^|\/)[^/]*\.(pem|key|p12|keystore|jks)$/,
-  /(^|\/)(credentials|secrets?|service-account)[^/]*$/i,
-  /(^|\/)google-services\.json$/,
-  /(^|\/)GoogleService-Info\.plist$/,
+//
+// Listing the names that look precious is the wrong way round. That list is a
+// guess about the future, and being wrong means deleting the one file that
+// mattered -- a firebase.profile-1.json sailed straight through an earlier
+// version of it. Guessing wrong about noise only costs a row in a table.
+//
+// So the question asked is "is this file unique to this worktree", answered by
+// comparing against the primary checkout, and only known-regenerable output is
+// filtered out. Wrong here means a harmless extra warning.
+const REGENERABLE_IGNORED = [
+  /(^|\/)\.DS_Store$/,
+  /\.log$/,
+  /(^|\/)\.flutter-plugins-dependencies$/,
+  /(^|\/)\.packages$/,
+  /(^|\/)Podfile\.lock$/,
+  /(^|\/)local\.properties$/,
+  // Toolchain codegen. Named explicitly because these differ between worktrees
+  // in ways location-normalisation cannot always absorb, and every one of them
+  // is reproduced by a build.
+  /(^|\/)Generated\.xcconfig$/,
+  /(^|\/)flutter_export_environment\.sh$/,
+  /(^|\/)GeneratedPluginRegistrant\.(java|swift|m|h)$/,
+  /(^|\/)generated_plugin_registrant\.(dart|cc)$/,
+  /(^|\/)generated_plugins\.cmake$/,
+  /(^|\/)firebase_options\.dart$/,
 ];
 
 // Removing a worktree never destroys a commit: the branch keeps them, and the
@@ -768,7 +792,11 @@ function getLastFetchAt(commonDir) {
   }
 }
 
-async function listPreciousIgnored(cwd) {
+async function listPreciousIgnored(cwd, primaryPath) {
+  // The primary checkout is the reference every other worktree is compared
+  // against, so it has nothing to be unique against.
+  if (!primaryPath || cwd === primaryPath) return [];
+
   const result = await git(cwd, ['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=normal'], {
     encoding: 'buffer',
     maxBuffer: 50 * 1024 * 1024,
@@ -776,13 +804,66 @@ async function listPreciousIgnored(cwd) {
 
   if (!result.ok || result.stdout.length === 0) return [];
 
-  return result.stdout
+  const candidates = result.stdout
     .toString('utf8')
     .split('\0')
     .filter((record) => record.startsWith('!! '))
     .map((record) => record.slice(3))
-    .filter((filePath) => PRECIOUS_IGNORED.some((pattern) => pattern.test(filePath)))
-    .filter((filePath) => !isSymbolicLink(path.join(cwd, filePath)));
+    // Directories are collapsed by --untracked-files=normal and are build
+    // output in practice; comparing them would cost a tree walk to say nothing.
+    .filter((filePath) => !filePath.endsWith('/'))
+    .filter((filePath) => !REGENERABLE_IGNORED.some((pattern) => pattern.test(filePath)));
+
+  const precious = [];
+
+  for (const filePath of candidates) {
+    const here = path.join(cwd, filePath);
+    // A symlinked file is a pointer: removing the worktree leaves the target.
+    if (isSymbolicLink(here)) continue;
+    if (isUniqueToWorktree(here, path.join(primaryPath, filePath), cwd, primaryPath)) {
+      precious.push(filePath);
+    }
+  }
+
+  return precious;
+}
+
+const NORMALISE_LIMIT_BYTES = 1024 * 1024;
+
+// Unique means "the primary checkout does not have this content", so duplicates
+// stay silent and anything you would actually lose does not.
+//
+// Byte comparison alone is not enough. Generated files bake their own absolute
+// path into themselves -- Generated.xcconfig and flutter_export_environment.sh
+// both do -- so every worktree's copy differs from every other while being
+// identical in substance. Uniqueness by raw bytes therefore flags exactly the
+// files that are cheapest to regenerate. Normalising each file's own location
+// out first asks the question that was meant: does this differ in more than
+// where it lives?
+function isUniqueToWorktree(here, reference, cwd, primaryPath) {
+  try {
+    if (!fs.statSync(here).isFile()) return false;
+
+    let referenceContent;
+    try {
+      referenceContent = fs.readFileSync(reference);
+    } catch {
+      return true; // Exists here, nowhere else.
+    }
+
+    const content = fs.readFileSync(here);
+    if (content.equals(referenceContent)) return false;
+
+    // Too big to be config worth normalising, and reading it as text would lie.
+    if (content.length > NORMALISE_LIMIT_BYTES || referenceContent.length > NORMALISE_LIMIT_BYTES) {
+      return true;
+    }
+
+    return content.toString('utf8').split(cwd).join(' WT ')
+      !== referenceContent.toString('utf8').split(primaryPath).join(' WT ');
+  } catch {
+    return false;
+  }
 }
 
 // A symlinked secret is not at risk: removing the worktree drops a pointer and

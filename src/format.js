@@ -117,6 +117,9 @@ export function formatCompactScanText(report, options = {}) {
   // it: showing both prints every worktree twice.
   if (options.buckets) {
     lines.push(...formatTierBuckets(report, theme, tableWidth));
+    if (options.commands) {
+      lines.push(...formatCleanupCommands(report, theme));
+    }
     return lines.join('\n').trimEnd();
   }
 
@@ -240,6 +243,56 @@ export function formatTierBuckets(report, theme, tableWidth) {
 // "merged" and "upstream gone" are claims about a remote this tool never
 // contacts. They are only as true as the last fetch, so the reader is told how
 // old that is rather than left to assume it is now.
+// The tool proposes; git disposes. Every command emitted here omits --force, so
+// git re-checks the claim independently before acting: `worktree remove` refuses
+// a dirty worktree, and `branch -d` refuses a branch it cannot see merged. A
+// refusal is not a broken command, it is the second opinion doing its job, and
+// it is worth more than anything concluded here.
+export function formatCleanupCommands(report, theme) {
+  const lines = [];
+  const items = collectWorktreeItems(report);
+
+  for (const bucket of TIER_BUCKETS.filter((candidate) => candidate.reclaimable)) {
+    const inBucket = items.filter(({ worktree }) => worktree.tier === bucket.tier);
+    if (inBucket.length === 0) continue;
+
+    lines.push(theme.muted(`# ${bucket.label} (${inBucket.length})`));
+
+    for (const { repo, worktree, branch } of inBucket) {
+      lines.push(`git -C ${shellQuote(repo.primaryPath)} worktree remove ${shellQuote(worktree.path)}`);
+
+      // Only the merged tier retires its branch, and only ever with -d. A
+      // squash-merged branch will be refused here because ancestry cannot see
+      // the merge, which would need -D -- and -D is exactly the check worth
+      // keeping.
+      if (bucket.tier === 'worktree-and-branch' && worktree.branch) {
+        // Only the branches -d will actually refuse get the note. Flagging all
+        // of them, as an earlier version did, is the same as flagging none.
+        const note = worktree.ancestryVisible
+          ? ''
+          : theme.muted('  # -d will refuse: squash-merged, only -D works');
+        lines.push(`git -C ${shellQuote(repo.primaryPath)} branch -d ${shellQuote(worktree.branch)}${note}`);
+      }
+    }
+
+    lines.push('');
+  }
+
+  if (lines.length === 0) return lines;
+
+  lines.unshift(
+    'Commands (review before running; none use --force)',
+    theme.muted('A refusal means git disagrees with this tool. Believe git.'),
+    '',
+  );
+
+  return lines;
+}
+
+function shellQuote(value) {
+  return `'${String(value).split("'").join("'\\''")}'`;
+}
+
 function formatRemoteStaleness(report, theme) {
   // Only repositories that actually make a remote claim matter here. Measuring
   // every repo on the machine let one cloned-once-in-2022 reference drag the

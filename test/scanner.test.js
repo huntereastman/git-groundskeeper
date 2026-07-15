@@ -81,22 +81,46 @@ test('scanRoots marks clean gone-upstream worktrees as prune candidates when mer
   assert.equal(branch.cleanupStatus, 'prune-candidate');
 });
 
-test('a clean worktree holding an ignored env file is reported, not silently reaped', async () => {
+test('an ignored file unique to a worktree is reported whatever it is called', async () => {
   const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'has-unique-file');
 
-  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), 'assets/.env\n');
+  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), 'scratch-notes.txt\n');
   git(fixture.repo, ['add', '.gitignore']);
-  git(fixture.repo, ['commit', '-m', 'ignore env']);
-  fs.mkdirSync(path.join(fixture.repo, 'assets'));
-  fs.writeFileSync(path.join(fixture.repo, 'assets', '.env'), 'API_KEY=secret\n');
+  git(fixture.repo, ['commit', '-m', 'ignore scratch']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/unique', linked, 'main']);
+
+  // A name no precious-pattern list would ever have guessed. That is the point:
+  // guessing names means being wrong loses data, so uniqueness is the test.
+  fs.writeFileSync(path.join(linked, 'scratch-notes.txt'), 'do not lose me\n');
 
   const report = await scanRoots([fixture.parent], { maxDepth: 4 });
   const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
-  const worktree = repo.worktrees.find((candidate) => candidate.path === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
 
-  // git status calls this clean, which is how a delete list eats an API key.
   assert.equal(worktree.dirty, false);
-  assert.deepEqual(worktree.preciousIgnored, ['assets/.env']);
+  assert.deepEqual(worktree.preciousIgnored, ['scratch-notes.txt']);
+});
+
+test('an ignored file duplicated from the primary checkout stays silent', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'has-duplicate');
+
+  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), 'config.json\n');
+  git(fixture.repo, ['add', '.gitignore']);
+  git(fixture.repo, ['commit', '-m', 'ignore config']);
+  fs.writeFileSync(path.join(fixture.repo, 'config.json'), '{"shared":true}\n');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/dup', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'config.json'), '{"shared":true}\n');
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // Byte-identical to the primary checkout, so nothing is lost by removal and
+  // warning about it would be the noise that buries a real finding.
+  assert.deepEqual(worktree.preciousIgnored, []);
 });
 
 test('a symlinked env file is not reported: removing the worktree cannot lose it', async () => {
@@ -199,6 +223,10 @@ test('scanRoots detects squash-merged branches that share no history with the ba
   assert.equal(worktree.cleanupStatus, 'prune-candidate');
   assert.equal(worktree.mergedVia, 'squash');
   assert.equal(worktree.mergedInto, 'origin/main');
+  // Proving the merge does not make `git branch -d` accept it: -d consults
+  // ancestry, which is exactly what a squash destroys. This is what tells the
+  // reader they will need -D here and nowhere else.
+  assert.equal(worktree.ancestryVisible, false);
 });
 
 test('squash detection can be disabled to keep the scan strictly read-only', async () => {
