@@ -1,0 +1,17 @@
+{
+  "name": "git-groundskeeper",
+  "version": "0.1.0",
+  "description": "Scan local Git forests for dirty worktrees, unpushed branches, stashes, and cleanup risks.",
+  "type": "module",
+  "bin": {
+    "git-groundskeeper": "bin/git-groundskeeper.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "scan": "node bin/git-groundskeeper.js scan"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
