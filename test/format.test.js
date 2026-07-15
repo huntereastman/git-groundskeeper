@@ -81,6 +81,24 @@ test('fetch staleness measures only the repos actually claiming merged', () => {
   assert.doesNotMatch(text, /1475/);
 });
 
+test('a wide terminal is spent on the columns that are still clipping', () => {
+  const report = createReport();
+  const long = '/workspace/Development/numbus/B2C/numbus-worktrees/a-very-long-worktree-name-here';
+  report.repos[0].worktrees[0].path = long;
+
+  const narrow = formatScanText(report, { tableWidth: 100, all: true });
+  const wide = formatScanText(report, { tableWidth: 220, all: true });
+
+  // Narrow has to clip. Wide has room to spare, so leaving the name cut short
+  // with empty space beside it would be a choice, and the wrong one.
+  assert.match(narrow, /\.\.\./);
+  assert.match(wide, /Development\/numbus\/B2C\/numbus-worktrees\/a-very-long-worktree-name-here/);
+
+  // The table must still respect the terminal it was given.
+  const widestLine = Math.max(...wide.split('\n').map((line) => line.length));
+  assert.ok(widestLine <= 220, `table overflowed: ${widestLine} > 220`);
+});
+
 test('sizes are base 10, matching the free space macOS reports', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;

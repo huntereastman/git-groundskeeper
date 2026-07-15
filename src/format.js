@@ -630,12 +630,19 @@ function renderTable(columns, rows, maxWidth, theme = createTheme({ color: 'neve
 }
 
 function fitColumnWidths(columns, rows, maxWidth) {
-  const widths = columns.map((column) => {
-    const longestCell = rows.reduce((longest, row) => Math.max(longest, visibleLength(String(row[column.key] ?? ''))), visibleLength(column.header));
-    return Math.min(Math.max(longestCell, column.minWidth), column.maxWidth);
-  });
+  const longestCells = columns.map((column) =>
+    rows.reduce(
+      (longest, row) => Math.max(longest, visibleLength(String(row[column.key] ?? ''))),
+      visibleLength(column.header),
+    ),
+  );
+
+  const widths = columns.map((column, index) =>
+    Math.min(Math.max(longestCells[index], column.minWidth), column.maxWidth),
+  );
 
   const targetWidth = Math.max(72, maxWidth);
+
   while (tableLineWidth(widths) > targetWidth) {
     const shrinkIndex = widths.reduce((bestIndex, width, index) => {
       if (width <= columns[index].minWidth) return bestIndex;
@@ -645,6 +652,21 @@ function fitColumnWidths(columns, rows, maxWidth) {
 
     if (shrinkIndex === -1) break;
     widths[shrinkIndex] -= 1;
+  }
+
+  // Spend whatever the terminal has left on columns that are still clipping.
+  // maxWidth exists to stop one column hogging a narrow terminal, not to leave
+  // half a wide one blank while paths are cut short. Truncating with empty
+  // space to the right of the table is nobody's preference.
+  while (tableLineWidth(widths) < targetWidth) {
+    const growIndex = widths.reduce((bestIndex, width, index) => {
+      if (width >= longestCells[index]) return bestIndex;
+      if (bestIndex === -1) return index;
+      return longestCells[index] - width > longestCells[bestIndex] - widths[bestIndex] ? index : bestIndex;
+    }, -1);
+
+    if (growIndex === -1) break;
+    widths[growIndex] += 1;
   }
 
   return widths;

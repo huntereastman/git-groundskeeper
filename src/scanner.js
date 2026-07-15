@@ -721,10 +721,20 @@ const REGENERABLE_IGNORED = [
   // is reproduced by a build.
   /(^|\/)Generated\.xcconfig$/,
   /(^|\/)flutter_export_environment\.sh$/,
+  /(^|\/)Flutter\.podspec$/,
   /(^|\/)GeneratedPluginRegistrant\.(java|swift|m|h)$/,
   /(^|\/)generated_plugin_registrant\.(dart|cc)$/,
   /(^|\/)generated_plugins\.cmake$/,
   /(^|\/)firebase_options\.dart$/,
+  // Editor state. Named file by file rather than skipping .idea/ wholesale,
+  // which is tempting and wrong: JetBrains keeps database credentials in
+  // .idea/dataSources.local.xml, so a blanket rule would silence the one file
+  // in there worth warning about. Anything unrecognised in .idea/ still shows.
+  /(^|\/)\.idea\/\.gitignore$/,
+  /(^|\/)\.idea\/[^/]+\.iml$/,
+  /(^|\/)\.idea\/(workspace|modules|misc|vcs|php|compiler|encodings|jarRepositories|material_theme_project_new)\.xml$/,
+  // A file that calls itself a cache is one.
+  /\.cache$/,
 ];
 
 // Removing a worktree never destroys a commit: the branch keeps them, and the

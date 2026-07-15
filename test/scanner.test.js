@@ -102,6 +102,35 @@ test('an ignored file unique to a worktree is reported whatever it is called', a
   assert.deepEqual(worktree.preciousIgnored, ['scratch-notes.txt']);
 });
 
+test('editor state is filtered but a secret sitting beside it is not', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'has-idea');
+
+  // JetBrains does not ignore .idea/ wholesale; it ignores individual files,
+  // which is why they are visible here at all. Ignoring the directory would
+  // collapse it to a single entry and the tool would see nothing inside.
+  fs.writeFileSync(
+    path.join(fixture.repo, '.gitignore'),
+    '.idea/workspace.xml\n.idea/*.iml\n.idea/dataSources.local.xml\n',
+  );
+  git(fixture.repo, ['add', '.gitignore']);
+  git(fixture.repo, ['commit', '-m', 'ignore idea state']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/idea', linked, 'main']);
+
+  fs.mkdirSync(path.join(linked, '.idea'));
+  fs.writeFileSync(path.join(linked, '.idea', 'workspace.xml'), '<project/>\n');
+  fs.writeFileSync(path.join(linked, '.idea', 'has-idea.iml'), '<module/>\n');
+  // JetBrains keeps database passwords here. Skipping .idea/ wholesale would
+  // be tidier and would silence exactly the file worth warning about.
+  fs.writeFileSync(path.join(linked, '.idea', 'dataSources.local.xml'), '<password>hunter2</password>\n');
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  assert.deepEqual(worktree.preciousIgnored, ['.idea/dataSources.local.xml']);
+});
+
 test('an ignored file duplicated from the primary checkout stays silent', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'has-duplicate');
