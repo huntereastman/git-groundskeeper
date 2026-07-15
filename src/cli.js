@@ -103,6 +103,10 @@ function parseArgs(argv) {
     } else if (arg === '--commands') {
       options.buckets = true;
       options.commands = true;
+    } else if (arg.startsWith('--commands=')) {
+      options.buckets = true;
+      options.commands = true;
+      options.commandsTier = parseCommandsTier(arg.split('=')[1]);
     } else if (arg === '--sizes') {
       options.sizes = true;
     } else if (arg === '--no-squash-detect') {
@@ -161,6 +165,14 @@ function parsePositiveInteger(value, flag) {
   return parsed;
 }
 
+function parseCommandsTier(value) {
+  const tiers = { 'worktree-and-branch': 'worktree-and-branch', 'worktree-only': 'worktree-only' };
+  if (!tiers[value]) {
+    throw new Error(`--commands= requires ${Object.keys(tiers).join(' or ')}`);
+  }
+  return tiers[value];
+}
+
 function parseOwner(value) {
   const owner = (value ?? '').trim();
   if (!owner || owner.startsWith('-')) {
@@ -211,9 +223,10 @@ Options:
                          wide scans; the default collapses them per directory.
   --buckets              List worktrees grouped by what removing them costs:
                          worktree + branch, worktree only, blocked, primary.
-  --commands             Print the removal commands for the safe buckets, so
-                         git re-checks each one. Implies --buckets. Never
-                         emits --force or -D.
+  --commands[=tier]      Print the removal commands for the safe buckets, so
+                         git re-checks each one. Implies --buckets. Never emits
+                         --force or -D. Pass a tier to act on one bucket only:
+                         worktree-and-branch, or worktree-only.
   --sizes                Measure each worktree on disk so buckets can total
                          what they reclaim. Adds a du walk per worktree.
   --no-squash-detect     Skip squash-merge detection, which synthesises a

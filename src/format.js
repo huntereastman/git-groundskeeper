@@ -118,7 +118,7 @@ export function formatCompactScanText(report, options = {}) {
   if (options.buckets) {
     lines.push(...formatTierBuckets(report, theme, tableWidth));
     if (options.commands) {
-      lines.push(...formatCleanupCommands(report, theme));
+      lines.push(...formatCleanupCommands(report, theme, options.commandsTier));
     }
     return lines.join('\n').trimEnd();
   }
@@ -248,11 +248,18 @@ export function formatTierBuckets(report, theme, tableWidth) {
 // a dirty worktree, and `branch -d` refuses a branch it cannot see merged. A
 // refusal is not a broken command, it is the second opinion doing its job, and
 // it is worth more than anything concluded here.
-export function formatCleanupCommands(report, theme) {
+export function formatCleanupCommands(report, theme, only = null) {
   const lines = [];
   const items = collectWorktreeItems(report);
 
-  for (const bucket of TIER_BUCKETS.filter((candidate) => candidate.reclaimable)) {
+  // Emitting every reclaimable bucket at once means piping the output removes
+  // 79 worktrees when you meant 23, and the difference includes the one holding
+  // a file that exists nowhere else. Acting on one bucket has to be sayable.
+  const buckets = TIER_BUCKETS.filter(
+    (candidate) => candidate.reclaimable && (!only || candidate.tier === only),
+  );
+
+  for (const bucket of buckets) {
     const inBucket = items.filter(({ worktree }) => worktree.tier === bucket.tier);
     if (inBucket.length === 0) continue;
 

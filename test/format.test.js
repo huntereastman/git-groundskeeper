@@ -115,6 +115,22 @@ test('sizes are base 10, matching the free space macOS reports', () => {
   assert.doesNotMatch(text, /0\.9GB/);
 });
 
+test('commands can be scoped to one bucket, so piping them cannot overreach', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+
+  worktrees[0].tier = 'blocked';
+  worktrees[1].tier = 'worktree-only';
+  worktrees[2].tier = 'worktree-and-branch';
+
+  const scoped = formatScanText(report, { commands: true, commandsTier: 'worktree-and-branch', buckets: true, all: true });
+  const commands = scoped.split('\n').filter((line) => line.startsWith('git '));
+
+  // Piping every reclaimable bucket removes 79 worktrees when you meant 23.
+  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
+  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")), false);
+});
+
 test('emitted commands never force, so git gets to disagree', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
