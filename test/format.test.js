@@ -63,6 +63,24 @@ test('long worktree and branch names keep the end, which is the part that differ
   assert.doesNotMatch(text, /Development\/numbus\/B2C\/nu\.\.\./);
 });
 
+test('fetch staleness measures only the repos actually claiming merged', () => {
+  const report = createReport();
+  const [repo] = report.repos;
+  const stale = new Date(Date.now() - 1475 * 86_400_000).toISOString();
+  const fresh = new Date(Date.now() - 2 * 86_400_000).toISOString();
+
+  repo.lastFetchAt = fresh;
+  repo.worktrees[2].tier = 'worktree-and-branch';
+  // A repo cloned once years ago and never fetched, with nothing to claim.
+  report.repos.push({ ...repo, primaryPath: '/workspace/ancient', lastFetchAt: stale, worktrees: [], branches: [], stashes: [], nestedRepos: [] });
+
+  const text = formatScanText(report, { buckets: true, all: true });
+
+  // The ancient repo makes no remote claim, so it must not drag the warning.
+  assert.match(text, /the oldest is 2 days old/);
+  assert.doesNotMatch(text, /1475/);
+});
+
 test('sizes are base 10, matching the free space macOS reports', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;

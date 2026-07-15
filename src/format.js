@@ -241,20 +241,30 @@ export function formatTierBuckets(report, theme, tableWidth) {
 // contacts. They are only as true as the last fetch, so the reader is told how
 // old that is rather than left to assume it is now.
 function formatRemoteStaleness(report, theme) {
-  const fetchTimes = report.repos
-    .map((repo) => repo.lastFetchAt)
-    .filter(Boolean)
-    .map((value) => new Date(value).getTime())
+  // Only repositories that actually make a remote claim matter here. Measuring
+  // every repo on the machine let one cloned-once-in-2022 reference drag the
+  // figure to four years and cry wolf about buckets resting on fresh data.
+  const claimingRepos = report.repos.filter((repo) =>
+    repo.worktrees.some((worktree) => worktree.cleanupStatus === 'prune-candidate'),
+  );
+
+  if (claimingRepos.length === 0) return [];
+
+  const unfetched = claimingRepos.filter((repo) => !repo.lastFetchAt).length;
+  const fetchTimes = claimingRepos
+    .map((repo) => new Date(repo.lastFetchAt ?? '').getTime())
     .filter((value) => Number.isFinite(value));
 
   if (fetchTimes.length === 0) {
-    return [theme.caution('Remote state age unknown: no fetch recorded. Run git fetch --prune before trusting "merged".')];
+    return [theme.caution('No fetch recorded for the repos claiming "merged". Run git fetch --prune before trusting them.')];
   }
 
   const oldestDays = Math.floor((Date.now() - Math.min(...fetchTimes)) / 86_400_000);
-  const message = `Remote claims rest on the last fetch, oldest here is ${oldestDays} ${oldestDays === 1 ? 'day' : 'days'} old. Nothing is fetched by this tool.`;
+  const scope = claimingRepos.length === 1 ? 'the repo claiming' : `the ${claimingRepos.length} repos claiming`;
+  const unfetchedNote = unfetched > 0 ? ` ${unfetched} recorded no fetch at all.` : '';
+  const message = `"merged" and "gone" rest on the last fetch of ${scope} them; the oldest is ${oldestDays} ${oldestDays === 1 ? 'day' : 'days'} old.${unfetchedNote} This tool never fetches.`;
 
-  return [oldestDays >= 1 ? theme.caution(message) : theme.muted(message)];
+  return [oldestDays >= 7 || unfetched > 0 ? theme.caution(message) : theme.muted(message)];
 }
 
 
