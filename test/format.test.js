@@ -46,6 +46,29 @@ test('formatScanText colors key compact metrics when color is forced', () => {
   assert.match(text, /\u001b\[31mdetached\u001b\[0m/);
 });
 
+test('cleanup buckets total only what is actually reclaimable', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+
+  worktrees[0].tier = 'blocked';
+  worktrees[0].bytes = 900 * 1024 * 1024;
+  worktrees[1].tier = 'worktree-only';
+  worktrees[1].bytes = 2 * 1024 * 1024 * 1024;
+  worktrees[2].tier = 'worktree-and-branch';
+  worktrees[2].bytes = 1024 * 1024 * 1024;
+
+  const text = formatScanText(report);
+
+  assert.match(text, /Cleanup buckets/);
+  // Every cell must resolve. A column-schema mismatch renders them as "...".
+  assert.doesNotMatch(text, /\| \.\.\.\s*\|/);
+  assert.match(text, /safe: remove worktree \+ branch\s+\| 1/);
+  assert.match(text, /blocked: uncommitted work\s+\| 1\s+\| -/);
+  // 2GB + 1GB reclaimable. The blocked worktree holds 900MB and is excluded:
+  // advertising a size next to "removing this loses work" invites disaster.
+  assert.match(text, /Reclaimable now: 3\.0GB/);
+});
+
 function createReport() {
   return {
     schemaVersion: 1,

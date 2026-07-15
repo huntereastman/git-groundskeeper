@@ -107,6 +107,8 @@ export function formatCompactScanText(report, options = {}) {
   }
   lines.push('');
 
+  lines.push(...formatTierBuckets(report, theme, tableWidth));
+
   if (visibleWorktrees.length === 0 && branchOnlyItems.length === 0 && stashes.length === 0) {
     lines.push('No outstanding Git state found.');
     return lines.join('\n');
@@ -135,6 +137,84 @@ export function formatCompactScanText(report, options = {}) {
   }
 
   return lines.join('\n').trimEnd();
+}
+
+const TIER_BUCKETS = [
+  {
+    tier: 'worktree-and-branch',
+    label: 'safe: remove worktree + branch',
+    note: 'clean, merged, upstream gone',
+    reclaimable: true,
+  },
+  {
+    tier: 'worktree-only',
+    label: 'safe: remove worktree',
+    note: 'clean; branch and commits kept',
+    reclaimable: true,
+  },
+  {
+    tier: 'blocked',
+    label: 'blocked: uncommitted work',
+    note: 'removing this loses work',
+    reclaimable: false,
+  },
+  {
+    tier: 'primary',
+    label: 'primary checkout',
+    note: 'never removed',
+    reclaimable: false,
+  },
+];
+
+export function formatTierBuckets(report, theme, tableWidth) {
+  const worktrees = report.repos.flatMap((repo) => repo.worktrees);
+  const lines = [];
+  const rows = [];
+  let reclaimableBytes = 0;
+  let anySize = false;
+
+  for (const bucket of TIER_BUCKETS) {
+    const inBucket = worktrees.filter((worktree) => worktree.tier === bucket.tier);
+    if (inBucket.length === 0) continue;
+
+    const sized = inBucket.filter((worktree) => Number.isInteger(worktree.bytes));
+    const bytes = sized.reduce((total, worktree) => total + worktree.bytes, 0);
+    if (sized.length > 0) anySize = true;
+    if (bucket.reclaimable) reclaimableBytes += bytes;
+
+    const paint = bucket.reclaimable ? theme.ok : theme.muted;
+
+    rows.push({
+      bucket: paint(bucket.label),
+      count: String(inBucket.length),
+      // A bucket nobody can reclaim has no savings to report, and printing a
+      // size next to it would read as an invitation.
+      reclaims: bucket.reclaimable && sized.length > 0 ? formatBytes(bytes) : '-',
+      note: theme.muted(bucket.note),
+    });
+  }
+
+  if (rows.length === 0) return lines;
+
+  lines.push('Cleanup buckets');
+  lines.push(...renderTable(tierColumns(), rows, tableWidth, theme));
+  lines.push(
+    anySize
+      ? theme.bold(`Reclaimable now: ${formatBytes(reclaimableBytes)}`)
+      : theme.muted('Sizes not measured. Use --sizes to total what each bucket reclaims.'),
+  );
+  lines.push('');
+
+  return lines;
+}
+
+function tierColumns() {
+  return [
+    { key: 'bucket', header: 'Bucket', minWidth: 28, maxWidth: 32 },
+    { key: 'count', header: 'Count', minWidth: 5, maxWidth: 7 },
+    { key: 'reclaims', header: 'Reclaims', minWidth: 8, maxWidth: 10 },
+    { key: 'note', header: 'Why', minWidth: 24, maxWidth: 36 },
+  ];
 }
 
 function collectWorktreeItems(report) {

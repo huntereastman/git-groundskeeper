@@ -66,6 +66,7 @@ function parseArgs(argv) {
     maxDepth: 8,
     largeFileBytes: 10 * 1024 * 1024,
     untrackedFiles: 'normal',
+    sizes: false,
     owners: [],
     onlyMine: false,
     detectOwners: true,
@@ -94,6 +95,8 @@ function parseArgs(argv) {
       options.color = 'never';
     } else if (arg === '--untracked-all') {
       options.untrackedFiles = 'all';
+    } else if (arg === '--sizes') {
+      options.sizes = true;
     } else if (arg === '--fail-on-attention') {
       options.failOnAttention = true;
     } else if (arg === '--help' || arg === '-h') {
@@ -194,6 +197,8 @@ Options:
   --large-file-mb <n>    Flag dirty files at or above this size. Default: 10.
   --untracked-all        List every file inside untracked directories. Slow on
                          wide scans; the default collapses them per directory.
+  --sizes                Measure each worktree on disk so cleanup buckets can
+                         total what they reclaim. Adds a du walk per worktree.
   --owner <name>         Account or org you own. Repeatable. Tags each repo as
                          mine, external, or no-remote by its remote URL. When
                          omitted, owners are detected via gh and cached a day.

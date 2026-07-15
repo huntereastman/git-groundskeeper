@@ -1,7 +1,11 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { git, mustGit } from './git.js';
+
+const execFileAsync = promisify(execFile);
 
 const SKIP_DIRS = new Set([
   '.git',
@@ -232,6 +236,12 @@ async function finishRepo(repo, worktrees, options) {
   applyBranchStateToWorktrees(worktrees, branchMap);
   await annotatePruneCandidates(primaryPath, worktrees, branchMap);
 
+  // Tier depends on cleanupStatus, so it can only be decided once prune
+  // candidates have been resolved.
+  for (const worktree of worktrees) {
+    worktree.tier = classifyTier(worktree, primaryPath);
+  }
+
   const stashes = await listStashes(primaryPath);
 
   return {
@@ -273,9 +283,12 @@ async function scanWorktree(worktreePath, options) {
   const aheadBehind = !branch && upstream.name
     ? await getAheadBehind(worktreePath, 'HEAD', upstream.name)
     : { ahead: null, behind: null, error: upstream.error ?? null };
+  const bytes = options.sizes ? await measureDiskUsageBytes(worktreePath) : null;
 
   return {
     path: worktreePath,
+    bytes,
+    tier: null,
     branch: branch ?? null,
     detached: branch === null,
     head,
@@ -598,6 +611,32 @@ export function parseRemoteOwner(url) {
     .filter(Boolean);
 
   return segments.length >= 2 ? segments[segments.length - 2] : null;
+}
+
+// Removing a worktree never destroys a commit: the branch keeps them, and the
+// checkout is just a materialised copy. So the bar for reclaiming disk is only
+// "no uncommitted work here", which is far lower than the bar for deleting the
+// branch itself. Conflating the two is what makes cleanup tools feel dangerous
+// and makes people keep everything forever.
+export function classifyTier(worktree, primaryPath) {
+  if (worktree.path === primaryPath) return 'primary';
+  if (worktree.dirty) return 'blocked';
+  if (worktree.cleanupStatus === 'prune-candidate') return 'worktree-and-branch';
+  return 'worktree-only';
+}
+
+async function measureDiskUsageBytes(targetPath) {
+  try {
+    const { stdout } = await execFileAsync('du', ['-sk', targetPath], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+    });
+
+    const kilobytes = Number.parseInt(stdout.trim().split(/\s+/)[0], 10);
+    return Number.isFinite(kilobytes) ? kilobytes * 1024 : null;
+  } catch {
+    return null;
+  }
 }
 
 export function classifyOwnership(repoOwners, myOwners) {
