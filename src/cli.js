@@ -1,5 +1,6 @@
 import process from 'node:process';
-import { scanRoots } from './scanner.js';
+import { defaultRoots, scanRoots } from './scanner.js';
+import { detectOwners } from './owners.js';
 import { formatScanText } from './format.js';
 
 const DEFAULT_INTERVAL_SECONDS = 15;
@@ -12,8 +13,20 @@ export async function runCli(argv) {
     return;
   }
 
+  if (options.owners.length === 0 && options.detectOwners) {
+    options.owners = await detectOwners({ refresh: options.refreshOwners });
+  }
+
+  // Filtering to owners we never resolved would report an empty machine and
+  // look like good news. Fail loudly instead.
+  if (options.onlyMine && options.owners.length === 0) {
+    throw new Error(
+      '--mine needs at least one owner. Pass --owner <name>, or authenticate gh so owners can be detected.',
+    );
+  }
+
   if (command === 'scan' || command === 'status') {
-    const report = scanRoots(roots, options);
+    const report = await scanRoots(roots, options);
     printReport(report, options);
     process.exitCode = options.failOnAttention && report.summary.attentionCount > 0 ? 1 : 0;
     return;
@@ -23,7 +36,7 @@ export async function runCli(argv) {
     const intervalMs = options.intervalSeconds * 1000;
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const report = scanRoots(roots, options);
+      const report = await scanRoots(roots, options);
       console.clear();
       printReport(report, options);
       await delay(intervalMs);
@@ -52,6 +65,11 @@ function parseArgs(argv) {
     help: false,
     maxDepth: 8,
     largeFileBytes: 10 * 1024 * 1024,
+    untrackedFiles: 'normal',
+    owners: [],
+    onlyMine: false,
+    detectOwners: true,
+    refreshOwners: false,
     intervalSeconds: DEFAULT_INTERVAL_SECONDS,
   };
 
@@ -74,6 +92,8 @@ function parseArgs(argv) {
       options.color = parseColorMode(arg.split('=')[1]);
     } else if (arg === '--no-color') {
       options.color = 'never';
+    } else if (arg === '--untracked-all') {
+      options.untrackedFiles = 'all';
     } else if (arg === '--fail-on-attention') {
       options.failOnAttention = true;
     } else if (arg === '--help' || arg === '-h') {
@@ -86,6 +106,20 @@ function parseArgs(argv) {
       options.largeFileBytes = parsePositiveInteger(args.shift(), '--large-file-mb') * 1024 * 1024;
     } else if (arg.startsWith('--large-file-mb=')) {
       options.largeFileBytes = parsePositiveInteger(arg.split('=')[1], '--large-file-mb') * 1024 * 1024;
+    } else if (arg === '--owner') {
+      options.owners.push(parseOwner(args.shift()));
+    } else if (arg.startsWith('--owner=')) {
+      options.owners.push(parseOwner(arg.slice('--owner='.length)));
+    } else if (arg === '--mine') {
+      options.onlyMine = true;
+    } else if (arg === '--no-detect-owners') {
+      options.detectOwners = false;
+    } else if (arg === '--refresh-owners') {
+      options.refreshOwners = true;
+    } else if (arg === '--concurrency') {
+      options.concurrency = parsePositiveInteger(args.shift(), '--concurrency');
+    } else if (arg.startsWith('--concurrency=')) {
+      options.concurrency = parsePositiveInteger(arg.split('=')[1], '--concurrency');
     } else if (arg === '--interval') {
       options.intervalSeconds = parsePositiveInteger(args.shift(), '--interval');
     } else if (arg.startsWith('--interval=')) {
@@ -98,7 +132,7 @@ function parseArgs(argv) {
   }
 
   if (roots.length === 0) {
-    roots.push(process.cwd());
+    roots.push(...defaultRoots());
   }
 
   return { command, roots, options };
@@ -110,6 +144,14 @@ function parsePositiveInteger(value, flag) {
     throw new Error(`${flag} requires a positive integer`);
   }
   return parsed;
+}
+
+function parseOwner(value) {
+  const owner = (value ?? '').trim();
+  if (!owner || owner.startsWith('-')) {
+    throw new Error('--owner requires an account or organization name');
+  }
+  return owner;
 }
 
 function parseColorMode(value) {
@@ -136,6 +178,10 @@ Usage:
   git-groundskeeper status [roots...] [options]
   git-groundskeeper watch [roots...] [options]
 
+Roots default to your home directory, so a bare scan discovers every
+repository on the machine with no prior knowledge of its layout. Pass roots
+explicitly to narrow the search, or "." for the current directory.
+
 Options:
   --json                 Print machine-readable JSON.
   --compact              Print the default actionable checklist.
@@ -146,12 +192,24 @@ Options:
   --fail-on-attention    Exit 1 when outstanding Git state is found.
   --max-depth <n>        Recursive discovery depth. Default: 8.
   --large-file-mb <n>    Flag dirty files at or above this size. Default: 10.
+  --untracked-all        List every file inside untracked directories. Slow on
+                         wide scans; the default collapses them per directory.
+  --owner <name>         Account or org you own. Repeatable. Tags each repo as
+                         mine, external, or no-remote by its remote URL. When
+                         omitted, owners are detected via gh and cached a day.
+  --mine                 Report only repos matching an owner. Cuts vendored
+                         dependencies and agent scratch out of the summary.
+  --no-detect-owners     Skip gh detection; rely only on --owner.
+  --refresh-owners       Re-query gh instead of using the cached owners.
+  --concurrency <n>      Git calls in flight. Default: available parallelism.
   --interval <seconds>   Watch interval. Default: 15.
   -h, --help             Show help.
 
 Examples:
+  git-groundskeeper scan
+  git-groundskeeper scan --details
+  git-groundskeeper scan .
   git-groundskeeper scan ~/Development
-  git-groundskeeper scan ~/Development --details
   git-groundskeeper scan ~/Development --json
   git-groundskeeper scan ~/Development --color=always
   git-groundskeeper scan ~/Development --fail-on-attention
