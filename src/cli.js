@@ -66,6 +66,7 @@ function parseArgs(argv) {
     maxDepth: 8,
     largeFileBytes: 10 * 1024 * 1024,
     untrackedFiles: 'normal',
+    buckets: false,
     sizes: false,
     squashDetect: true,
     owners: [],
@@ -96,6 +97,8 @@ function parseArgs(argv) {
       options.color = 'never';
     } else if (arg === '--untracked-all') {
       options.untrackedFiles = 'all';
+    } else if (arg === '--buckets') {
+      options.buckets = true;
     } else if (arg === '--sizes') {
       options.sizes = true;
     } else if (arg === '--no-squash-detect') {
@@ -200,8 +203,10 @@ Options:
   --large-file-mb <n>    Flag dirty files at or above this size. Default: 10.
   --untracked-all        List every file inside untracked directories. Slow on
                          wide scans; the default collapses them per directory.
-  --sizes                Measure each worktree on disk so cleanup buckets can
-                         total what they reclaim. Adds a du walk per worktree.
+  --buckets              List worktrees grouped by what removing them costs:
+                         worktree + branch, worktree only, blocked, primary.
+  --sizes                Measure each worktree on disk so buckets can total
+                         what they reclaim. Adds a du walk per worktree.
   --no-squash-detect     Skip squash-merge detection, which synthesises a
                          dangling commit to compare content. Keeps the scan
                          strictly read-only; misses squash-merged branches.

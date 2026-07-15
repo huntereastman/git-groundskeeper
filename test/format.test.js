@@ -8,19 +8,13 @@ test('formatScanText defaults to compact actionable cleanup output', () => {
   assert.match(text, /Git Groundskeeper Compact/);
   assert.match(text, /In scope: 3 worktrees, 3 need attention/);
   assert.match(text, /Worktree summaries \(3 needing attention \/ 3 in scope\)/);
-  assert.match(text, /app\n\+[-+]+\+\n\| Field/);
-  assert.match(text, /\| Branch\s+\| main/);
-  assert.match(text, /\| Needs\s+\| commit, push, review large files/);
-  assert.match(text, /\| Changes\s+\| stg:1 mod:2 new:3/);
-  assert.match(text, /\| Remote\s+\| push \+2/);
-  assert.match(text, /app-admin\n\+[-+]+\+\n\| Field/);
-  assert.match(text, /\| Branch\s+\| DETACHED/);
-  assert.match(text, /\| Needs\s+\| attach branch/);
-  assert.match(text, /\| Remote\s+\| detached/);
-  assert.match(text, /done-worktree/);
-  assert.match(text, /\| Needs\s+\| prune/);
-  assert.match(text, /\| Remote\s+\| prune \(origin\/main\)/);
-  assert.match(text, /12.0MB/);
+  // One row per worktree, not a Field/Value block each: 92 worktrees of
+  // vertical tables is about 1,100 lines of scroll.
+  assert.match(text, /\| Worktree\s+\| Branch\s+\| Needs\s+\| Remote\s+\|/);
+  assert.doesNotMatch(text, /\| Field\s+\| Value\s+\|/);
+  assert.match(text, /\| app\s+\| main\s+\| commit, push, review large files\s+\| push \+2\s+\|/);
+  assert.match(text, /\| app-admin\s+\| DETACHED\s+\| attach branch\s+\| detached\s+\|/);
+  assert.match(text, /\| done-worktree\s+\| feature\/done\s+\| prune\s+\| prune \(origin\/main\)\s+\|/);
   assert.match(text, /Repository-level branch cleanup \(2\)/);
   assert.match(text, /feature\/local/);
   assert.match(text, /feature\/old/);
@@ -46,7 +40,28 @@ test('formatScanText colors key compact metrics when color is forced', () => {
   assert.match(text, /\u001b\[31mdetached\u001b\[0m/);
 });
 
-test('cleanup buckets total only what is actually reclaimable', () => {
+test('long worktree and branch names keep the end, which is the part that differs', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+  const prefix = '/workspace/Development/numbus/B2C/numbus-worktrees';
+
+  worktrees[0].path = `${prefix}/cashflow-date-range-bar`;
+  worktrees[0].branch = 'codex/cashflow-date-range-bar';
+  worktrees[1].path = `${prefix}/cashflow-mobile-date-row`;
+  worktrees[1].branch = 'codex/cashflow-mobile-date-row';
+
+  const text = formatScanText(report, { all: true });
+
+  // Clipping the end would render both rows as "Development/numbus/B2C/nu..."
+  // and "codex/cashflow-da...", making them indistinguishable, which defeats
+  // the point of listing them at all. The tail must survive in both columns.
+  assert.match(text, /cashflow-date-range-bar\s+\|/);
+  assert.match(text, /cashflow-mobile-date-row\s+\|/);
+  assert.match(text, /\.\.\./);
+  assert.doesNotMatch(text, /Development\/numbus\/B2C\/nu\.\.\./);
+});
+
+test('buckets list the worktrees in each tier, not just a count', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
 
@@ -57,16 +72,19 @@ test('cleanup buckets total only what is actually reclaimable', () => {
   worktrees[2].tier = 'worktree-and-branch';
   worktrees[2].bytes = 1024 * 1024 * 1024;
 
-  const text = formatScanText(report);
+  const text = formatScanText(report, { buckets: true, all: true });
 
-  assert.match(text, /Cleanup buckets/);
-  // Every cell must resolve. A column-schema mismatch renders them as "...".
-  assert.doesNotMatch(text, /\| \.\.\.\s*\|/);
-  assert.match(text, /safe: remove worktree \+ branch\s+\| 1/);
-  assert.match(text, /blocked: uncommitted work\s+\| 1\s+\| -/);
-  // 2GB + 1GB reclaimable. The blocked worktree holds 900MB and is excluded:
-  // advertising a size next to "removing this loses work" invites disaster.
+  // A bucket you cannot see into is a number, not a decision. Each tier heading
+  // must be followed by the worktrees actually in it.
+  assert.match(text, /safe: remove worktree \+ branch \(1, 1\.0GB\)[\s\S]*?\| done-worktree\s+\|/);
+  assert.match(text, /safe: remove worktree \(1, 2\.0GB\)[\s\S]*?\| app-admin\s+\|/);
+  // Blocked holds 900MB but its heading must not total it: a size beside
+  // "removing this loses work" reads as an invitation.
+  assert.match(text, /blocked: uncommitted work \(1\) - removing this loses work/);
+  // 2GB + 1GB. The blocked 900MB is excluded.
   assert.match(text, /Reclaimable now: 3\.0GB/);
+  // The flat list is replaced, not preceded: printing both lists every worktree twice.
+  assert.doesNotMatch(text, /Worktree summaries/);
 });
 
 function createReport() {

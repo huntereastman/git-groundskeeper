@@ -107,20 +107,39 @@ export function formatCompactScanText(report, options = {}) {
   }
   lines.push('');
 
-  lines.push(...formatTierBuckets(report, theme, tableWidth));
-
   if (visibleWorktrees.length === 0 && branchOnlyItems.length === 0 && stashes.length === 0) {
     lines.push('No outstanding Git state found.');
     return lines.join('\n');
   }
 
+  // --buckets answers "what can I remove, and what does it cost me" by grouping
+  // worktrees under their tier. It replaces the flat list rather than preceding
+  // it: showing both prints every worktree twice.
+  if (options.buckets) {
+    lines.push(...formatTierBuckets(report, theme, tableWidth));
+    return lines.join('\n').trimEnd();
+  }
+
   if (visibleWorktrees.length > 0) {
+    // One row per worktree, not a table per worktree. A vertical Field/Value
+    // block reads well for one repo and becomes a thousand lines of scroll at
+    // machine scale, which is where this tool now operates. --details still
+    // renders the deep per-worktree view.
+    const showSizes = visibleWorktrees.some(({ worktree }) => Number.isInteger(worktree.bytes));
+    const ordered = showSizes
+      ? [...visibleWorktrees].sort((a, b) => (b.worktree.bytes ?? 0) - (a.worktree.bytes ?? 0))
+      : visibleWorktrees;
+
     lines.push(formatWorktreeSummaryTitle(visibleWorktrees.length, scopedAttentionWorktrees.length, scopedWorktrees.length, options.all));
-    for (const item of visibleWorktrees) {
-      lines.push('');
-      lines.push(theme.bold(shortenPath(item.worktree.path, report.roots)));
-      lines.push(...renderTable(worktreeSummaryColumns(), formatWorktreeSummaryRows(item, theme), tableWidth, theme));
+    if (showSizes) {
+      lines.push(theme.muted('Largest first.'));
     }
+    lines.push(...renderTable(
+      worktreeRowColumns(showSizes),
+      formatWorktreeRows(ordered, report.roots, theme, showSizes),
+      tableWidth,
+      theme,
+    ));
     lines.push('');
   }
 
@@ -166,56 +185,78 @@ const TIER_BUCKETS = [
   },
 ];
 
+// The worktrees themselves, one row each, grouped under the tier they sit in.
+// A summary of counts answers "how much" and leaves nothing to act on; the
+// point of a bucket is knowing which worktrees are in it.
 export function formatTierBuckets(report, theme, tableWidth) {
-  const worktrees = report.repos.flatMap((repo) => repo.worktrees);
+  const items = collectWorktreeItems(report);
   const lines = [];
-  const rows = [];
   let reclaimableBytes = 0;
   let anySize = false;
 
   for (const bucket of TIER_BUCKETS) {
-    const inBucket = worktrees.filter((worktree) => worktree.tier === bucket.tier);
+    const inBucket = items.filter(({ worktree }) => worktree.tier === bucket.tier);
     if (inBucket.length === 0) continue;
 
-    const sized = inBucket.filter((worktree) => Number.isInteger(worktree.bytes));
-    const bytes = sized.reduce((total, worktree) => total + worktree.bytes, 0);
-    if (sized.length > 0) anySize = true;
+    const sized = inBucket.filter(({ worktree }) => Number.isInteger(worktree.bytes));
+    const bytes = sized.reduce((total, { worktree }) => total + worktree.bytes, 0);
+    const showSizes = sized.length > 0;
+    if (showSizes) anySize = true;
     if (bucket.reclaimable) reclaimableBytes += bytes;
 
     const paint = bucket.reclaimable ? theme.ok : theme.muted;
+    // Blocked and primary never advertise a size. A number beside "removing
+    // this loses work" reads as an invitation.
+    const total = bucket.reclaimable && showSizes ? `, ${formatBytes(bytes)}` : '';
 
-    rows.push({
-      bucket: paint(bucket.label),
-      count: String(inBucket.length),
-      // A bucket nobody can reclaim has no savings to report, and printing a
-      // size next to it would read as an invitation.
-      reclaims: bucket.reclaimable && sized.length > 0 ? formatBytes(bytes) : '-',
-      note: theme.muted(bucket.note),
-    });
+    lines.push(`${paint(bucket.label)} (${inBucket.length}${total}) ${theme.muted(`- ${bucket.note}`)}`);
+
+    const ordered = showSizes
+      ? [...inBucket].sort((a, b) => (b.worktree.bytes ?? 0) - (a.worktree.bytes ?? 0))
+      : inBucket;
+
+    lines.push(...renderTable(
+      worktreeRowColumns(showSizes, 'buckets'),
+      formatWorktreeRows(ordered, report.roots, theme, showSizes),
+      tableWidth,
+      theme,
+    ));
+    lines.push('');
   }
 
-  if (rows.length === 0) return lines;
+  if (lines.length === 0) return lines;
 
-  lines.push('Cleanup buckets');
-  lines.push(...renderTable(tierColumns(), rows, tableWidth, theme));
   lines.push(
     anySize
       ? theme.bold(`Reclaimable now: ${formatBytes(reclaimableBytes)}`)
       : theme.muted('Sizes not measured. Use --sizes to total what each bucket reclaims.'),
   );
+  lines.push(...formatRemoteStaleness(report, theme));
   lines.push('');
 
   return lines;
 }
 
-function tierColumns() {
-  return [
-    { key: 'bucket', header: 'Bucket', minWidth: 28, maxWidth: 32 },
-    { key: 'count', header: 'Count', minWidth: 5, maxWidth: 7 },
-    { key: 'reclaims', header: 'Reclaims', minWidth: 8, maxWidth: 10 },
-    { key: 'note', header: 'Why', minWidth: 24, maxWidth: 36 },
-  ];
+// "merged" and "upstream gone" are claims about a remote this tool never
+// contacts. They are only as true as the last fetch, so the reader is told how
+// old that is rather than left to assume it is now.
+function formatRemoteStaleness(report, theme) {
+  const fetchTimes = report.repos
+    .map((repo) => repo.lastFetchAt)
+    .filter(Boolean)
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value));
+
+  if (fetchTimes.length === 0) {
+    return [theme.caution('Remote state age unknown: no fetch recorded. Run git fetch --prune before trusting "merged".')];
+  }
+
+  const oldestDays = Math.floor((Date.now() - Math.min(...fetchTimes)) / 86_400_000);
+  const message = `Remote claims rest on the last fetch, oldest here is ${oldestDays} ${oldestDays === 1 ? 'day' : 'days'} old. Nothing is fetched by this tool.`;
+
+  return [oldestDays >= 1 ? theme.caution(message) : theme.muted(message)];
 }
+
 
 function collectWorktreeItems(report) {
   return report.repos
@@ -291,6 +332,53 @@ function formatWorktreeSummaryTitle(visibleCount, attentionCount, totalCount, al
   return `Worktree summaries (${attentionCount} needing attention / ${totalCount} in scope)`;
 }
 
+function worktreeRowColumns(showSizes, variant = 'list') {
+  const columns = [
+    { key: 'worktree', header: 'Worktree', minWidth: 22, maxWidth: 46, clip: 'start' },
+    { key: 'branch', header: 'Branch', minWidth: 10, maxWidth: 26, clip: 'start' },
+  ];
+
+  // In a bucket, the tier heading already states the need, so a Needs column
+  // prints "prune" twenty-three times: real information, zero variance, and it
+  // steals the width that Remote needs to name the ref the work landed in.
+  if (variant !== 'buckets') {
+    columns.push({ key: 'needs', header: 'Needs', minWidth: 14, maxWidth: 34 });
+  }
+
+  columns.push(
+    // Clipped from the start: "prune (origin/dev)" losing its tail leaves
+    // "prune (origin/..." which is the one fact the column exists to carry.
+    { key: 'remote', header: 'Remote', minWidth: 10, maxWidth: 20, clip: 'start' },
+    // Unversioned files that vanish with the checkout. Named, not counted: the
+    // decision is "do I still need assets/.env", which a number cannot answer.
+    { key: 'keeps', header: 'Keeps', minWidth: 5, maxWidth: 24 },
+  );
+
+  if (showSizes) {
+    columns.push({ key: 'size', header: 'Size', minWidth: 6, maxWidth: 8 });
+  }
+
+  return columns;
+}
+
+function formatWorktreeRows(items, roots, theme, showSizes) {
+  return items.map(({ worktree, branch }) => {
+    const row = {
+      worktree: shortenPath(worktree.path, roots),
+      branch: worktree.branch ?? theme.bad('DETACHED'),
+      needs: colorNeeds(formatNeeds(worktree, branch), theme),
+      remote: colorRemote(formatRemoteState(worktree, branch), theme),
+      keeps: formatPreciousIgnored(worktree, theme),
+    };
+
+    if (showSizes) {
+      row.size = Number.isInteger(worktree.bytes) ? formatBytes(worktree.bytes) : '-';
+    }
+
+    return row;
+  });
+}
+
 function formatWorktreeSummaryRows({ worktree, branch }, theme) {
   return [
     { field: 'Branch', value: worktree.branch ?? 'DETACHED' },
@@ -320,6 +408,19 @@ function formatStashRows(items, roots, theme) {
   }));
 }
 
+function formatPreciousIgnored(worktree, theme) {
+  const precious = worktree.preciousIgnored ?? [];
+  if (precious.length === 0) return '-';
+
+  // One file gets its path, since assets/.env and .env are different questions.
+  // Several get the bare name plus a count, which fits and still says what.
+  const label = precious.length === 1
+    ? precious[0]
+    : `${path.basename(precious[0])} +${precious.length - 1}`;
+
+  return theme.caution(label);
+}
+
 function formatChanges(worktree) {
   if (!worktree.dirty) return 'clean';
   return `stg:${worktree.status.staged} mod:${worktree.status.unstaged} new:${worktree.status.untracked}`;
@@ -327,6 +428,8 @@ function formatChanges(worktree) {
 
 function formatNeeds(worktree, branch) {
   const needs = [];
+  if (worktree.inProgress) needs.push(`finish ${worktree.inProgress}`);
+  if (worktree.locked) needs.push('locked');
   if (worktree.dirty) needs.push('commit');
   if (worktree.detached) needs.push('attach branch');
   if (Number.isInteger(branch?.ahead) && branch.ahead > 0) needs.push('push');
@@ -447,10 +550,10 @@ function repoStateColumns() {
 function renderTable(columns, rows, maxWidth, theme = createTheme({ color: 'never' })) {
   const widths = fitColumnWidths(columns, rows, maxWidth);
   const border = theme.muted(`+${widths.map((width) => '-'.repeat(width + 2)).join('+')}+`);
-  const lines = [border, renderTableRow(columns.map((column) => theme.muted(column.header)), widths), border];
+  const lines = [border, renderTableRow(columns.map((column) => theme.muted(column.header)), widths, columns), border];
 
   for (const row of rows) {
-    lines.push(renderTableRow(columns.map((column) => row[column.key] ?? ''), widths));
+    lines.push(renderTableRow(columns.map((column) => row[column.key] ?? ''), widths, columns));
   }
 
   lines.push(border);
@@ -482,15 +585,25 @@ function tableLineWidth(widths) {
   return widths.reduce((total, width) => total + width, 0) + widths.length * 3 + 1;
 }
 
-function renderTableRow(values, widths) {
-  return `| ${values.map((value, index) => padRight(clip(String(value), widths[index]), widths[index])).join(' | ')} |`;
+function renderTableRow(values, widths, columns = []) {
+  return `| ${values
+    .map((value, index) => padRight(clip(String(value), widths[index], columns[index]?.clip), widths[index]))
+    .join(' | ')} |`;
 }
 
-function clip(value, width) {
+// Paths and branch names carry their identity in the tail. Every numbus
+// worktree starts "Development/numbus/B2C/numbus-worktrees/", so clipping the
+// end renders every row identical and throws away the only distinguishing
+// part. Those columns keep the tail and drop the shared prefix instead.
+function clip(value, width, mode = 'end') {
   if (visibleLength(value) <= width) return value;
+
   const plainValue = stripAnsi(value);
   if (width <= 3) return plainValue.slice(0, width);
-  return `${plainValue.slice(0, width - 3)}...`;
+
+  return mode === 'start'
+    ? `...${plainValue.slice(plainValue.length - (width - 3))}`
+    : `${plainValue.slice(0, width - 3)}...`;
 }
 
 function padRight(value, width) {

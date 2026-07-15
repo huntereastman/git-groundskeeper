@@ -250,6 +250,10 @@ async function finishRepo(repo, worktrees, options) {
     nestedRepos: [],
     owners: repo.owners,
     ownership: repo.ownership,
+    // Nothing here fetches. "upstream gone" only means the remote branch was
+    // absent at the last fetch, so every remote-derived claim is exactly this
+    // stale. Surfacing the age lets a reader weigh it instead of trusting it.
+    lastFetchAt: getLastFetchAt(repo.commonDir),
     worktrees,
     branches: [...branchMap.values()].sort((a, b) => a.name.localeCompare(b.name)),
     stashes,
@@ -284,11 +288,19 @@ async function scanWorktree(worktreePath, options) {
     ? await getAheadBehind(worktreePath, 'HEAD', upstream.name)
     : { ahead: null, behind: null, error: upstream.error ?? null };
   const bytes = options.sizes ? await measureDiskUsageBytes(worktreePath) : null;
+  const gitDir = resolveGitDir(worktreePath);
+  const dirty = statusEntries.length > 0;
+  // Only clean worktrees can be proposed for removal, so they are the only ones
+  // whose hidden files matter. This keeps the extra call off the majority.
+  const preciousIgnored = dirty ? [] : await listPreciousIgnored(worktreePath);
 
   return {
     path: worktreePath,
     bytes,
     tier: null,
+    locked: isLockedWorktree(gitDir),
+    inProgress: detectInProgress(gitDir),
+    preciousIgnored,
     branch: branch ?? null,
     detached: branch === null,
     head,
@@ -664,6 +676,19 @@ export function parseRemoteOwner(url) {
   return segments.length >= 2 ? segments[segments.length - 2] : null;
 }
 
+// Files git is told to ignore are invisible to `git status`, so a worktree can
+// report perfectly clean while holding the only copy of something you need.
+// These are not dirty and must not block cleanup -- most are duplicates across
+// worktrees -- but a delete list that never mentions them is lying by omission.
+const PRECIOUS_IGNORED = [
+  /(^|\/)\.env($|\.)/,
+  /(^|\/)[^/]*\.local$/,
+  /(^|\/)[^/]*\.(pem|key|p12|keystore|jks)$/,
+  /(^|\/)(credentials|secrets?|service-account)[^/]*$/i,
+  /(^|\/)google-services\.json$/,
+  /(^|\/)GoogleService-Info\.plist$/,
+];
+
 // Removing a worktree never destroys a commit: the branch keeps them, and the
 // checkout is just a materialised copy. So the bar for reclaiming disk is only
 // "no uncommitted work here", which is far lower than the bar for deleting the
@@ -672,8 +697,77 @@ export function parseRemoteOwner(url) {
 export function classifyTier(worktree, primaryPath) {
   if (worktree.path === primaryPath) return 'primary';
   if (worktree.dirty) return 'blocked';
+  // Git locks a worktree precisely to say "do not reap this". Honour it.
+  if (worktree.locked) return 'blocked';
+  // A paused rebase or merge leaves no dirty files, so status calls it clean
+  // while the operation's state lives in the worktree's git dir. Removing it
+  // throws that away silently.
+  if (worktree.inProgress) return 'blocked';
   if (worktree.cleanupStatus === 'prune-candidate') return 'worktree-and-branch';
   return 'worktree-only';
+}
+
+// A linked worktree's .git is a file pointing at the real git dir; the primary
+// worktree's is the directory itself. Resolving it by hand keeps the checks
+// below on the filesystem instead of spawning more git processes.
+function resolveGitDir(worktreePath) {
+  const dotGit = path.join(worktreePath, '.git');
+
+  try {
+    if (fs.statSync(dotGit).isDirectory()) return dotGit;
+    const pointer = fs.readFileSync(dotGit, 'utf8').trim();
+    const match = /^gitdir:\s*(.+)$/.exec(pointer);
+    return match ? path.resolve(worktreePath, match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectInProgress(gitDir) {
+  if (!gitDir) return null;
+
+  const markers = [
+    ['rebase-merge', 'rebase'],
+    ['rebase-apply', 'rebase'],
+    ['MERGE_HEAD', 'merge'],
+    ['CHERRY_PICK_HEAD', 'cherry-pick'],
+    ['REVERT_HEAD', 'revert'],
+    ['BISECT_LOG', 'bisect'],
+  ];
+
+  for (const [marker, operation] of markers) {
+    if (fs.existsSync(path.join(gitDir, marker))) return operation;
+  }
+
+  return null;
+}
+
+function isLockedWorktree(gitDir) {
+  return gitDir ? fs.existsSync(path.join(gitDir, 'locked')) : false;
+}
+
+function getLastFetchAt(commonDir) {
+  try {
+    return fs.statSync(path.join(commonDir, 'FETCH_HEAD')).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+async function listPreciousIgnored(cwd) {
+  const result = await git(cwd, ['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=normal'], {
+    encoding: 'buffer',
+    maxBuffer: 50 * 1024 * 1024,
+  });
+
+  if (!result.ok || result.stdout.length === 0) return [];
+
+  return result.stdout
+    .toString('utf8')
+    .split('\0')
+    .filter((record) => record.startsWith('!! '))
+    .map((record) => record.slice(3))
+    .filter((filePath) => PRECIOUS_IGNORED.some((pattern) => pattern.test(filePath)));
 }
 
 async function measureDiskUsageBytes(targetPath) {

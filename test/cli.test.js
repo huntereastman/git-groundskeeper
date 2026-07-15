@@ -14,7 +14,7 @@ test('scan exits 0 when attention is found by default', () => {
   assert.equal(result.status, 0);
   assert.match(result.stdout, /Git Groundskeeper Compact/);
   assert.match(result.stdout, /Worktree summaries \(1 needing attention \/ 1 in scope\)/);
-  assert.match(result.stdout, /\| Field\s+\| Value/);
+  assert.match(result.stdout, /\| Worktree\s+\| Branch\s+\| Needs\s+\| Remote\s+\|/);
 });
 
 test('scan exits 1 for attention when fail-on-attention is requested', () => {

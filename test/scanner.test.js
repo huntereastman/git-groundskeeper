@@ -81,6 +81,70 @@ test('scanRoots marks clean gone-upstream worktrees as prune candidates when mer
   assert.equal(branch.cleanupStatus, 'prune-candidate');
 });
 
+test('a clean worktree holding an ignored env file is reported, not silently reaped', async () => {
+  const fixture = createFixture();
+
+  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), 'assets/.env\n');
+  git(fixture.repo, ['add', '.gitignore']);
+  git(fixture.repo, ['commit', '-m', 'ignore env']);
+  fs.mkdirSync(path.join(fixture.repo, 'assets'));
+  fs.writeFileSync(path.join(fixture.repo, 'assets', '.env'), 'API_KEY=secret\n');
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === fixture.repo);
+
+  // git status calls this clean, which is how a delete list eats an API key.
+  assert.equal(worktree.dirty, false);
+  assert.deepEqual(worktree.preciousIgnored, ['assets/.env']);
+});
+
+test('a worktree paused mid-rebase is blocked even though it looks clean', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'rebasing');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/rebasing', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'theirs.txt'), 'theirs\n');
+  git(linked, ['add', 'theirs.txt']);
+  git(linked, ['commit', '-m', 'theirs']);
+
+  fs.writeFileSync(path.join(fixture.repo, 'theirs.txt'), 'ours\n');
+  git(fixture.repo, ['add', 'theirs.txt']);
+  git(fixture.repo, ['commit', '-m', 'ours']);
+
+  // Deliberately conflicting rebase, left paused.
+  try {
+    git(linked, ['rebase', 'main']);
+  } catch {
+    // Expected: the rebase stops on the conflict.
+  }
+  git(linked, ['checkout', '--ours', '.']);
+  git(linked, ['add', '.']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.worktrees.some((worktree) => worktree.path === linked));
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  assert.equal(worktree.inProgress, 'rebase');
+  assert.equal(worktree.tier, 'blocked');
+});
+
+test('a locked worktree is never proposed for removal', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'locked-worktree');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/locked', linked, 'main']);
+  git(fixture.repo, ['worktree', 'lock', linked]);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.worktrees.some((worktree) => worktree.path === linked));
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // Locking a worktree is git's own way of saying "do not reap this".
+  assert.equal(worktree.locked, true);
+  assert.equal(worktree.tier, 'blocked');
+});
+
 test('scanRoots detects squash-merged branches that share no history with the base', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'squashed-worktree');
