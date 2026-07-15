@@ -67,6 +67,7 @@ function parseArgs(argv) {
     largeFileBytes: 10 * 1024 * 1024,
     untrackedFiles: 'normal',
     sizes: false,
+    squashDetect: true,
     owners: [],
     onlyMine: false,
     detectOwners: true,
@@ -97,6 +98,8 @@ function parseArgs(argv) {
       options.untrackedFiles = 'all';
     } else if (arg === '--sizes') {
       options.sizes = true;
+    } else if (arg === '--no-squash-detect') {
+      options.squashDetect = false;
     } else if (arg === '--fail-on-attention') {
       options.failOnAttention = true;
     } else if (arg === '--help' || arg === '-h') {
@@ -199,6 +202,9 @@ Options:
                          wide scans; the default collapses them per directory.
   --sizes                Measure each worktree on disk so cleanup buckets can
                          total what they reclaim. Adds a du walk per worktree.
+  --no-squash-detect     Skip squash-merge detection, which synthesises a
+                         dangling commit to compare content. Keeps the scan
+                         strictly read-only; misses squash-merged branches.
   --owner <name>         Account or org you own. Repeatable. Tags each repo as
                          mine, external, or no-remote by its remote URL. When
                          omitted, owners are detected via gh and cached a day.

@@ -81,6 +81,63 @@ test('scanRoots marks clean gone-upstream worktrees as prune candidates when mer
   assert.equal(branch.cleanupStatus, 'prune-candidate');
 });
 
+test('scanRoots detects squash-merged branches that share no history with the base', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'squashed-worktree');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/squashed', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'one.txt'), 'one\n');
+  git(linked, ['add', 'one.txt']);
+  git(linked, ['commit', '-m', 'first half']);
+  fs.writeFileSync(path.join(linked, 'two.txt'), 'two\n');
+  git(linked, ['add', 'two.txt']);
+  git(linked, ['commit', '-m', 'second half']);
+
+  git(linked, ['push', '-u', 'origin', 'feature/squashed']);
+
+  // Exactly what GitHub's "Squash and merge" does: collapse the branch into one
+  // new commit on main that shares no ancestry with it, then drop the remote
+  // branch. The work is fully merged; the history says otherwise.
+  git(fixture.repo, ['merge', '--squash', 'feature/squashed']);
+  git(fixture.repo, ['commit', '-m', 'squashed feature (#1)']);
+  git(fixture.repo, ['push', 'origin', 'main']);
+  git(fixture.repo, ['push', 'origin', '--delete', 'feature/squashed']);
+  git(linked, ['fetch', '--prune', 'origin']);
+
+  // Ancestry genuinely cannot see this, which is the whole problem.
+  assert.throws(() => git(linked, ['merge-base', '--is-ancestor', 'feature/squashed', 'origin/main']));
+
+  const report = await scanRoots([linked], { maxDepth: 1 });
+  const repo = report.repos.find((candidate) => candidate.worktrees.some((worktree) => worktree.path === linked));
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  assert.equal(worktree.cleanupStatus, 'prune-candidate');
+  assert.equal(worktree.mergedVia, 'squash');
+  assert.equal(worktree.mergedInto, 'origin/main');
+});
+
+test('squash detection can be disabled to keep the scan strictly read-only', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'squashed-optout');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/optout', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'thing.txt'), 'thing\n');
+  git(linked, ['add', 'thing.txt']);
+  git(linked, ['commit', '-m', 'work']);
+  git(linked, ['push', '-u', 'origin', 'feature/optout']);
+  git(fixture.repo, ['merge', '--squash', 'feature/optout']);
+  git(fixture.repo, ['commit', '-m', 'squashed (#2)']);
+  git(fixture.repo, ['push', 'origin', 'main']);
+  git(fixture.repo, ['push', 'origin', '--delete', 'feature/optout']);
+  git(linked, ['fetch', '--prune', 'origin']);
+
+  const report = await scanRoots([linked], { maxDepth: 1, squashDetect: false });
+  const repo = report.repos.find((candidate) => candidate.worktrees.some((worktree) => worktree.path === linked));
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  assert.equal(worktree.cleanupStatus, null);
+});
+
 test('scanRoots reports nested submodule folders instead of Git storage paths', async () => {
   const fixture = createFixture();
   const adminSource = path.join(fixture.parent, 'admin-source');

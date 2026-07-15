@@ -234,7 +234,7 @@ async function finishRepo(repo, worktrees, options) {
   }
 
   applyBranchStateToWorktrees(worktrees, branchMap);
-  await annotatePruneCandidates(primaryPath, worktrees, branchMap);
+  await annotatePruneCandidates(primaryPath, worktrees, branchMap, options);
 
   // Tier depends on cleanupStatus, so it can only be decided once prune
   // candidates have been resolved.
@@ -384,7 +384,7 @@ function applyBranchStateToWorktrees(worktrees, branchMap) {
   }
 }
 
-async function annotatePruneCandidates(cwd, worktrees, branchMap) {
+async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) {
   // Resolving base refs costs roughly eight Git calls. Most repositories have
   // no candidate at all, so doing it first spent that on every repository on
   // the machine to answer a question with no askers.
@@ -400,10 +400,25 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap) {
     if (!branch) continue;
 
     let mergedInto = null;
+    let mergedVia = null;
+
+    // Ancestry first: it is cheaper and it is the common case for merge commits
+    // and fast-forwards.
     for (const baseRef of baseRefs) {
       if (await isAncestor(cwd, worktree.branch, baseRef)) {
         mergedInto = baseRef;
+        mergedVia = 'history';
         break;
+      }
+    }
+
+    if (!mergedInto && options.squashDetect !== false) {
+      for (const baseRef of baseRefs) {
+        if (await isSquashMerged(cwd, worktree.branch, baseRef)) {
+          mergedInto = baseRef;
+          mergedVia = 'squash';
+          break;
+        }
       }
     }
 
@@ -411,8 +426,10 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap) {
 
     worktree.cleanupStatus = 'prune-candidate';
     worktree.mergedInto = mergedInto;
+    worktree.mergedVia = mergedVia;
     branch.cleanupStatus = 'prune-candidate';
     branch.mergedInto = mergedInto;
+    branch.mergedVia = mergedVia;
   }
 }
 
@@ -445,6 +462,40 @@ async function getDefaultRemoteHead(cwd) {
 
 async function refExists(cwd, ref) {
   return (await git(cwd, ['rev-parse', '--verify', '--quiet', ref])).ok;
+}
+
+// GitHub's default "Squash and merge" does not graft a branch onto the base.
+// It collapses the branch's commits into one brand new commit with no shared
+// ancestry, so `merge-base --is-ancestor` correctly answers "no" forever even
+// though every line of the work is already on the base. Left there, a
+// history-only check reports almost nothing as merged on a squash-merge repo.
+//
+// Content answers what ancestry cannot: synthesise the branch's cumulative
+// change as a single commit off the merge base, then ask whether an equivalent
+// patch already exists on the base. That is the same shape the squash produced,
+// so their patch ids match.
+//
+// This is the one write the tool performs. The synthesised commit is dangling,
+// referenced by nothing, and collected by the next `git gc`; no existing object
+// or ref is modified. It runs only for branches that are already clean and
+// already gone from the remote. Pass squashDetect: false to keep the scan
+// strictly read-only, at the cost of missing squash-merged branches.
+async function isSquashMerged(cwd, branch, baseRef) {
+  const mergeBase = (await git(cwd, ['merge-base', baseRef, branch])).stdout.trim();
+  if (!mergeBase) return false;
+
+  const tree = (await git(cwd, ['rev-parse', `${branch}^{tree}`])).stdout.trim();
+  if (!tree) return false;
+
+  const synthesised = await git(cwd, ['commit-tree', tree, '-p', mergeBase, '-m', 'git-groundskeeper probe']);
+  if (!synthesised.ok) return false;
+
+  const cherry = await git(cwd, ['cherry', baseRef, synthesised.stdout.trim()]);
+  if (!cherry.ok) return false;
+
+  // `git cherry` prints "- <sha>" when an equivalent patch is already upstream
+  // and "+ <sha>" when it is not.
+  return cherry.stdout.trim().startsWith('-');
 }
 
 async function isAncestor(cwd, maybeAncestor, descendant) {
