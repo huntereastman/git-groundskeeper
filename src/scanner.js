@@ -781,7 +781,20 @@ async function listPreciousIgnored(cwd) {
     .split('\0')
     .filter((record) => record.startsWith('!! '))
     .map((record) => record.slice(3))
-    .filter((filePath) => PRECIOUS_IGNORED.some((pattern) => pattern.test(filePath)));
+    .filter((filePath) => PRECIOUS_IGNORED.some((pattern) => pattern.test(filePath)))
+    .filter((filePath) => !isSymbolicLink(path.join(cwd, filePath)));
+}
+
+// A symlinked secret is not at risk: removing the worktree drops a pointer and
+// leaves the target untouched. Symlinking .env into every worktree is a normal
+// way to avoid copying it around, so reporting those made 32 of 33 warnings
+// noise -- and noise is how a reader learns to skip the one that matters.
+function isSymbolicLink(absolutePath) {
+  try {
+    return fs.lstatSync(absolutePath).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 async function measureDiskUsageBytes(targetPath) {

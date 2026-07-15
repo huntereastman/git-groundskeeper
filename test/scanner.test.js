@@ -99,6 +99,27 @@ test('a clean worktree holding an ignored env file is reported, not silently rea
   assert.deepEqual(worktree.preciousIgnored, ['assets/.env']);
 });
 
+test('a symlinked env file is not reported: removing the worktree cannot lose it', async () => {
+  const fixture = createFixture();
+  const shared = path.join(fixture.parent, 'shared.env');
+
+  fs.writeFileSync(shared, 'API_KEY=shared\n');
+  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), 'assets/.env\n');
+  git(fixture.repo, ['add', '.gitignore']);
+  git(fixture.repo, ['commit', '-m', 'ignore env']);
+  fs.mkdirSync(path.join(fixture.repo, 'assets'));
+  fs.symlinkSync(shared, path.join(fixture.repo, 'assets', '.env'));
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === fixture.repo);
+
+  // Symlinking .env into each worktree is a normal way to avoid copying it.
+  // Warning about those buries the one worktree holding a real file.
+  assert.deepEqual(worktree.preciousIgnored, []);
+  assert.equal(fs.readFileSync(shared, 'utf8'), 'API_KEY=shared\n');
+});
+
 test('a worktree paused mid-rebase is blocked even though it looks clean', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'rebasing');
