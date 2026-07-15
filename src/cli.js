@@ -103,6 +103,8 @@ function parseArgs(argv) {
       options.sizes = true;
     } else if (arg === '--no-squash-detect') {
       options.squashDetect = false;
+    } else if (arg === '--no-pr-check') {
+      options.prCheck = false;
     } else if (arg === '--fail-on-attention') {
       options.failOnAttention = true;
     } else if (arg === '--help' || arg === '-h') {
@@ -210,6 +212,8 @@ Options:
   --no-squash-detect     Skip squash-merge detection, which synthesises a
                          dangling commit to compare content. Keeps the scan
                          strictly read-only; misses squash-merged branches.
+  --no-pr-check          Skip asking gh whether a branch's pull request was
+                         merged. Falls back to local inference only.
   --owner <name>         Account or org you own. Repeatable. Tags each repo as
                          mine, external, or no-remote by its remote URL. When
                          omitted, owners are detected via gh and cached a day.

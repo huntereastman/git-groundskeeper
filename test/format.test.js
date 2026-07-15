@@ -14,7 +14,9 @@ test('formatScanText defaults to compact actionable cleanup output', () => {
   assert.doesNotMatch(text, /\| Field\s+\| Value\s+\|/);
   assert.match(text, /\| app\s+\| main\s+\| commit, push, review large files\s+\| push \+2\s+\|/);
   assert.match(text, /\| app-admin\s+\| DETACHED\s+\| attach branch\s+\| detached\s+\|/);
-  assert.match(text, /\| done-worktree\s+\| feature\/done\s+\| prune\s+\| prune \(origin\/main\)\s+\|/);
+  // The Remote cell names how the merge was established, not just that it was:
+  // "pr" is GitHub's answer, "squash" and "merged" are local inference.
+  assert.match(text, /\| done-worktree\s+\| feature\/done\s+\| prune\s+\| merged \(origin\/main\)\s+\|/);
   assert.match(text, /Repository-level branch cleanup \(2\)/);
   assert.match(text, /feature\/local/);
   assert.match(text, /feature\/old/);
@@ -61,16 +63,34 @@ test('long worktree and branch names keep the end, which is the part that differ
   assert.doesNotMatch(text, /Development\/numbus\/B2C\/nu\.\.\./);
 });
 
+test('sizes are base 10, matching the free space macOS reports', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+
+  worktrees[0].tier = 'worktree-only';
+  worktrees[0].bytes = 1_000_000_000;
+
+  const text = formatScanText(report, { buckets: true, all: true });
+
+  // Dividing by 1024 and printing "GB" would render this 0.9GB: a GiB wearing
+  // the wrong label, understating the reclaim against the only number a reader
+  // will check it against.
+  assert.match(text, /1\.0GB/);
+  assert.doesNotMatch(text, /0\.9GB/);
+});
+
 test('buckets list the worktrees in each tier, not just a count', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
 
+  // Base 10 throughout, matching how macOS reports free space and therefore
+  // how these totals get checked.
   worktrees[0].tier = 'blocked';
-  worktrees[0].bytes = 900 * 1024 * 1024;
+  worktrees[0].bytes = 900_000_000;
   worktrees[1].tier = 'worktree-only';
-  worktrees[1].bytes = 2 * 1024 * 1024 * 1024;
+  worktrees[1].bytes = 2_000_000_000;
   worktrees[2].tier = 'worktree-and-branch';
-  worktrees[2].bytes = 1024 * 1024 * 1024;
+  worktrees[2].bytes = 1_000_000_000;
 
   const text = formatScanText(report, { buckets: true, all: true });
 

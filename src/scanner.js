@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { git, mustGit } from './git.js';
+import { listMergedPullRequestBranches } from './owners.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -407,6 +408,12 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
 
   const baseRefs = await listPruneBaseRefs(cwd);
 
+  // Ask GitHub once per repository, and only when something might qualify.
+  // A branch absent from this list is not proven unmerged: the list is capped,
+  // and plenty of work lands without a pull request. Presence is confirmation;
+  // absence falls through to inference.
+  const mergedPullRequests = options.prCheck === false ? null : await listMergedPullRequestBranches(cwd);
+
   for (const worktree of candidates) {
     const branch = branchMap.get(worktree.branch);
     if (!branch) continue;
@@ -414,9 +421,16 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
     let mergedInto = null;
     let mergedVia = null;
 
-    // Ancestry first: it is cheaper and it is the common case for merge commits
-    // and fast-forwards.
-    for (const baseRef of baseRefs) {
+    // GitHub's own answer outranks anything derived locally.
+    const mergedBase = mergedPullRequests?.get(worktree.branch);
+    if (mergedBase) {
+      mergedInto = `origin/${mergedBase}`;
+      mergedVia = 'pr';
+    }
+
+    // Ancestry next: cheap, and the common case for merge commits and
+    // fast-forwards.
+    for (const baseRef of mergedInto ? [] : baseRefs) {
       if (await isAncestor(cwd, worktree.branch, baseRef)) {
         mergedInto = baseRef;
         mergedVia = 'history';
@@ -777,8 +791,10 @@ async function measureDiskUsageBytes(targetPath) {
       maxBuffer: 1024 * 1024,
     });
 
-    const kilobytes = Number.parseInt(stdout.trim().split(/\s+/)[0], 10);
-    return Number.isFinite(kilobytes) ? kilobytes * 1024 : null;
+    // du -k reports 1024-byte blocks, so the multiplier is 1024 regardless of
+    // how the result is later displayed. Stored values are always true bytes.
+    const kibibytes = Number.parseInt(stdout.trim().split(/\s+/)[0], 10);
+    return Number.isFinite(kibibytes) ? kibibytes * 1024 : null;
   } catch {
     return null;
   }

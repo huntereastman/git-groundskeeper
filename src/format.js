@@ -334,24 +334,25 @@ function formatWorktreeSummaryTitle(visibleCount, attentionCount, totalCount, al
 
 function worktreeRowColumns(showSizes, variant = 'list') {
   const columns = [
-    { key: 'worktree', header: 'Worktree', minWidth: 22, maxWidth: 46, clip: 'start' },
-    { key: 'branch', header: 'Branch', minWidth: 10, maxWidth: 26, clip: 'start' },
+    { key: 'worktree', header: 'Worktree', minWidth: 22, maxWidth: 46 },
+    { key: 'branch', header: 'Branch', minWidth: 10, maxWidth: 26 },
   ];
 
   // In a bucket, the tier heading already states the need, so a Needs column
   // prints "prune" twenty-three times: real information, zero variance, and it
   // steals the width that Remote needs to name the ref the work landed in.
   if (variant !== 'buckets') {
-    columns.push({ key: 'needs', header: 'Needs', minWidth: 14, maxWidth: 34 });
+    // Prose, read left to right.
+    columns.push({ key: 'needs', header: 'Needs', minWidth: 14, maxWidth: 34, clip: 'end' });
   }
 
   columns.push(
-    // Clipped from the start: "prune (origin/dev)" losing its tail leaves
-    // "prune (origin/..." which is the one fact the column exists to carry.
-    { key: 'remote', header: 'Remote', minWidth: 10, maxWidth: 20, clip: 'start' },
+    { key: 'remote', header: 'Remote', minWidth: 10, maxWidth: 20 },
     // Unversioned files that vanish with the checkout. Named, not counted: the
     // decision is "do I still need assets/.env", which a number cannot answer.
-    { key: 'keeps', header: 'Keeps', minWidth: 5, maxWidth: 24 },
+    // Clipped from the end because the count is written first, so a squeezed
+    // cell still says how many files are at stake.
+    { key: 'keeps', header: 'Keeps', minWidth: 5, maxWidth: 24, clip: 'end' },
   );
 
   if (showSizes) {
@@ -413,10 +414,11 @@ function formatPreciousIgnored(worktree, theme) {
   if (precious.length === 0) return '-';
 
   // One file gets its path, since assets/.env and .env are different questions.
-  // Several get the bare name plus a count, which fits and still says what.
+  // Several lead with the count so that a clipped cell still warns you there
+  // are four files here, not one.
   const label = precious.length === 1
     ? precious[0]
-    : `${path.basename(precious[0])} +${precious.length - 1}`;
+    : `${precious.length} files: ${path.basename(precious[0])}`;
 
   return theme.caution(label);
 }
@@ -444,12 +446,16 @@ function formatRemoteState(worktree, branch) {
   if (worktree.detached) return 'detached';
   if (!branch) return worktree.upstreamStatus ?? 'unknown';
 
-  if (branch.upstreamStatus === 'none') {
-    return 'no upstream';
+  // How a merge was established changes how much the row can be trusted, so it
+  // is shown rather than flattened into a single confident word. "pr" is
+  // GitHub's answer; the rest are local inference.
+  if (branch.cleanupStatus === 'prune-candidate' && branch.mergedInto) {
+    const via = branch.mergedVia === 'pr' ? 'pr' : branch.mergedVia === 'squash' ? 'squash' : 'merged';
+    return `${via} (${branch.mergedInto})`;
   }
 
-  if (branch.cleanupStatus === 'prune-candidate') {
-    return `prune (${branch.mergedInto})`;
+  if (branch.upstreamStatus === 'none') {
+    return 'no upstream';
   }
 
   if (branch.upstreamStatus === 'gone') {
@@ -525,15 +531,15 @@ function colorBranchIssue(issue, theme) {
 
 function worktreeSummaryColumns() {
   return [
-    { key: 'field', header: 'Field', minWidth: 8, maxWidth: 10 },
-    { key: 'value', header: 'Value', minWidth: 28, maxWidth: 96 },
+    { key: 'field', header: 'Field', minWidth: 8, maxWidth: 10, clip: 'end' },
+    { key: 'value', header: 'Value', minWidth: 28, maxWidth: 96, clip: 'end' },
   ];
 }
 
 function branchColumns() {
   return [
     { key: 'branch', header: 'Branch', minWidth: 18, maxWidth: 38 },
-    { key: 'issue', header: 'Issue', minWidth: 10, maxWidth: 16 },
+    { key: 'issue', header: 'Issue', minWidth: 10, maxWidth: 16, clip: 'end' },
     { key: 'upstream', header: 'Upstream', minWidth: 12, maxWidth: 32 },
     { key: 'repo', header: 'Repo', minWidth: 18, maxWidth: 42 },
   ];
@@ -542,8 +548,8 @@ function branchColumns() {
 function repoStateColumns() {
   return [
     { key: 'repo', header: 'Repo', minWidth: 18, maxWidth: 42 },
-    { key: 'state', header: 'State', minWidth: 10, maxWidth: 14 },
-    { key: 'detail', header: 'Detail', minWidth: 18, maxWidth: 56 },
+    { key: 'state', header: 'State', minWidth: 10, maxWidth: 14, clip: 'end' },
+    { key: 'detail', header: 'Detail', minWidth: 18, maxWidth: 56, clip: 'end' },
   ];
 }
 
@@ -591,19 +597,24 @@ function renderTableRow(values, widths, columns = []) {
     .join(' | ')} |`;
 }
 
-// Paths and branch names carry their identity in the tail. Every numbus
-// worktree starts "Development/numbus/B2C/numbus-worktrees/", so clipping the
-// end renders every row identical and throws away the only distinguishing
-// part. Those columns keep the tail and drop the shared prefix instead.
-function clip(value, width, mode = 'end') {
+// Almost everything this tool prints is an identifier whose meaning lives at
+// the end: worktree paths share "Development/numbus/B2C/numbus-worktrees/",
+// agent branches share "codex/", upstreams share "prune (origin/". Clipping
+// the end of those keeps the boilerplate and discards the identity, so rows
+// render identical and the table becomes decoration.
+//
+// Keeping the tail is therefore the default, and columns holding prose opt out
+// with clip: 'end'. This was fixed reactively three separate times, once per
+// column, before the pattern was worth admitting.
+function clip(value, width, mode = 'start') {
   if (visibleLength(value) <= width) return value;
 
   const plainValue = stripAnsi(value);
   if (width <= 3) return plainValue.slice(0, width);
 
-  return mode === 'start'
-    ? `...${plainValue.slice(plainValue.length - (width - 3))}`
-    : `${plainValue.slice(0, width - 3)}...`;
+  return mode === 'end'
+    ? `${plainValue.slice(0, width - 3)}...`
+    : `...${plainValue.slice(plainValue.length - (width - 3))}`;
 }
 
 function padRight(value, width) {
@@ -721,15 +732,20 @@ function statusIcon(status) {
   }
 }
 
+// Base 10, matching what macOS reports. These numbers exist to be compared
+// against the free space in Finder or Disk Utility, and those divide by 1000.
+// Dividing by 1024 and printing "GB" is a GiB wearing the wrong label: it
+// understates the reclaim by 7% against the only figure a reader will check it
+// against.
 function formatBytes(bytes) {
-  if (bytes >= 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+  if (bytes >= 1_000_000_000) {
+    return `${(bytes / 1_000_000_000).toFixed(1)}GB`;
   }
-  if (bytes >= 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  if (bytes >= 1_000_000) {
+    return `${(bytes / 1_000_000).toFixed(1)}MB`;
   }
-  if (bytes >= 1024) {
-    return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes >= 1000) {
+    return `${(bytes / 1000).toFixed(1)}KB`;
   }
   return `${bytes}B`;
 }

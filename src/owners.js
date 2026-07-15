@@ -65,6 +65,28 @@ async function ghLines(args) {
   }
 }
 
+// "upstream gone plus the content is on the base" is an inference. GitHub knows
+// the actual answer: whether a pull request for this branch was merged, and
+// into what. Returns null when gh cannot answer -- missing, unauthenticated,
+// offline, or not a GitHub remote -- so callers fall back to inference rather
+// than treating silence as "not merged".
+export async function listMergedPullRequestBranches(cwd) {
+  try {
+    const { stdout } = await execFileAsync(
+      'gh',
+      ['pr', 'list', '--state', 'merged', '--limit', '200', '--json', 'headRefName,baseRefName'],
+      { cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
+    );
+
+    const merged = JSON.parse(stdout);
+    if (!Array.isArray(merged)) return null;
+
+    return new Map(merged.map((pullRequest) => [pullRequest.headRefName, pullRequest.baseRefName]));
+  } catch {
+    return null;
+  }
+}
+
 function readCache() {
   try {
     const parsed = JSON.parse(fs.readFileSync(ownersCachePath(), 'utf8'));
