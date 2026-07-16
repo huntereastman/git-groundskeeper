@@ -77,8 +77,14 @@ test('fetch staleness measures only the repos actually claiming merged', () => {
   const text = formatScanText(report, { buckets: true, all: true });
 
   // The ancient repo makes no remote claim, so it must not drag the warning.
-  assert.match(text, /the oldest is 2 days old/);
+  // Two days is not worth a line at all: a stamp on every run is the tool
+  // narrating its own provenance at a reader who did not ask.
   assert.doesNotMatch(text, /1475/);
+  assert.doesNotMatch(text, /Remote data is/);
+
+  repo.lastFetchAt = stale;
+  const staleText = formatScanText(report, { buckets: true, all: true });
+  assert.match(staleText, /Remote data is 1475 days old/);
 });
 
 test('a wide terminal is spent on the columns that are still clipping', () => {
@@ -126,7 +132,8 @@ test('a merged branch that outlived its worktree is shown and gets a command', (
     behind: null,
     cleanupStatus: 'prune-candidate',
     mergedInto: 'origin/dev',
-    mergedVia: 'squash',
+    mergedVia: 'pr',
+    pullRequest: { number: 198, base: 'dev', mergedAt: '2026-06-25' },
     ancestryVisible: false,
     checkedOut: false,
     worktreePath: null,
@@ -138,10 +145,16 @@ test('a merged branch that outlived its worktree is shown and gets a command', (
   // showing it is the same as not detecting it. A cleanup pass creates these.
   assert.match(text, /safe: remove branch \(1\)/);
   assert.match(text, /\| codex\/left-behind\s+\|/);
-  assert.match(text, /needs -D/);
 
   const commands = text.split('\n').filter((line) => line.startsWith('git '));
-  assert.ok(commands.some((line) => line.includes("branch -d 'codex/left-behind'")));
+
+  // A squash merge destroys ancestry while keeping the code, so -d refuses a
+  // branch that is provably merged. Emitting it anyway printed a command that
+  // could only fail. -D is the verb that works, and the PR that proves the
+  // merge rides along so the reader can check the claim rather than trust it.
+  assert.ok(commands.some((line) => line.includes("branch -D 'codex/left-behind'")));
+  assert.equal(commands.some((line) => line.includes("branch -d 'codex/left-behind'")), false);
+  assert.match(text, /PR #198 merged to dev 2026-06-25/);
 });
 
 test('commands can be scoped to one bucket, so piping them cannot overreach', () => {
@@ -160,7 +173,7 @@ test('commands can be scoped to one bucket, so piping them cannot overreach', ()
   assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")), false);
 });
 
-test('emitted commands never force, so git gets to disagree', () => {
+test('worktree removal never forces, and -d is used where git can confirm it', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
 
@@ -170,22 +183,22 @@ test('emitted commands never force, so git gets to disagree', () => {
   worktrees[1].tier = 'worktree-only';
   worktrees[2].tier = 'worktree-and-branch';
 
+  // Merged the ordinary way, so ancestry sees it and -d can do its job.
+  const done = report.repos[0].branches.find((branch) => branch.name === 'feature/done');
+  done.ancestryVisible = true;
+
   const text = formatScanText(report, { commands: true, buckets: true, all: true });
 
-  // Assert on the commands themselves, not the prose around them: the header
-  // reads "none use --force", so scanning the whole blob tests the paragraph
-  // rather than the behaviour.
   const commands = text.split('\n').filter((line) => line.startsWith('git '));
 
   assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
   // Paths with spaces must survive being pasted into a shell.
   assert.ok(commands.every((line) => line.startsWith("git -C '/workspace/4 Pillars/app'")));
-  // Only the merged tier retires a branch, and only ever with -d.
+  // Only the merged tier retires a branch. This one's merge is visible in
+  // history, so -d can confirm it and gets to.
   assert.ok(commands.some((line) => line.includes("branch -d 'feature/done'")));
-  // Force would remove git's independent check, which is the only part of this
-  // that does not depend on the tool being right.
-  assert.equal(commands.some((line) => line.includes('--force')), false);
-  assert.equal(commands.some((line) => line.includes('branch -D')), false);
+  // worktree remove never forces: a refusal there means real uncommitted work.
+  assert.equal(commands.some((line) => line.includes('worktree remove') && line.includes('--force')), false);
   // Nothing is proposed for the bucket that would lose work.
   assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app'")), false);
 });

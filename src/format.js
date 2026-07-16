@@ -237,11 +237,9 @@ export function formatTierBuckets(report, theme, tableWidth) {
 
   if (lines.length === 0) return lines;
 
-  lines.push(
-    anySize
-      ? theme.bold(`Reclaimable now: ${formatBytes(reclaimableBytes)}`)
-      : theme.muted('Sizes not measured. Use --sizes to total what each bucket reclaims.'),
-  );
+  if (anySize) {
+    lines.push(theme.bold(`Reclaimable now: ${formatBytes(reclaimableBytes)}`));
+  }
   lines.push(...formatRemoteStaleness(report, theme));
   lines.push('');
 
@@ -294,11 +292,28 @@ function orphanColumns() {
 // "merged" and "upstream gone" are claims about a remote this tool never
 // contacts. They are only as true as the last fetch, so the reader is told how
 // old that is rather than left to assume it is now.
-// The tool proposes; git disposes. Every command emitted here omits --force, so
-// git re-checks the claim independently before acting: `worktree remove` refuses
-// a dirty worktree, and `branch -d` refuses a branch it cannot see merged. A
-// refusal is not a broken command, it is the second opinion doing its job, and
-// it is worth more than anything concluded here.
+// Emit the command that works.
+//
+// `worktree remove` never forces: a refusal there means real uncommitted work,
+// which is a second opinion worth deferring to.
+//
+// Branch deletion is not that. `-d` decides by ancestry, and a squash merge
+// destroys ancestry while keeping the code, so -d refuses branches that are
+// provably merged and has no information to offer about them. Printing -d for
+// those produced eleven commands guaranteed to fail, each annotated with the
+// reason it would fail. -D is simply the correct verb once the merge is
+// established, so the evidence that established it goes in the comment.
+function branchDeleteCommand(repoPath, branch, theme) {
+  if (branch.ancestryVisible) {
+    return `git -C ${shellQuote(repoPath)} branch -d ${shellQuote(branch.name)}`;
+  }
+
+  const evidence = branch.pullRequest
+    ? `PR #${branch.pullRequest.number} merged to ${branch.pullRequest.base} ${branch.pullRequest.mergedAt}`
+    : `squash-merged into ${branch.mergedInto}, content verified`;
+
+  return `git -C ${shellQuote(repoPath)} branch -D ${shellQuote(branch.name)}${theme.muted(`  # ${evidence}`)}`;
+}
 export function formatCleanupCommands(report, theme, only = null) {
   const lines = [];
   const items = collectWorktreeItems(report);
@@ -323,13 +338,11 @@ export function formatCleanupCommands(report, theme, only = null) {
       // squash-merged branch will be refused here because ancestry cannot see
       // the merge, which would need -D -- and -D is exactly the check worth
       // keeping.
+      // Only emit -d where it will work. Printing a command annotated with the
+      // reason it is about to fail is not a safety feature, it is noise the
+      // reader has to filter by hand.
       if (bucket.tier === 'worktree-and-branch' && worktree.branch) {
-        // Only the branches -d will actually refuse get the note. Flagging all
-        // of them, as an earlier version did, is the same as flagging none.
-        const note = worktree.ancestryVisible
-          ? ''
-          : theme.muted('  # -d will refuse: squash-merged, only -D works');
-        lines.push(`git -C ${shellQuote(repo.primaryPath)} branch -d ${shellQuote(worktree.branch)}${note}`);
+        lines.push(branchDeleteCommand(repo.primaryPath, branch ?? worktree, theme));
       }
     }
 
@@ -343,22 +356,11 @@ export function formatCleanupCommands(report, theme, only = null) {
     lines.push(theme.muted(`# safe: remove branch (${orphans.length})`));
 
     for (const { repo, branch } of orphans) {
-      const note = branch.ancestryVisible
-        ? ''
-        : theme.muted('  # -d will refuse: squash-merged, only -D works');
-      lines.push(`git -C ${shellQuote(repo.primaryPath)} branch -d ${shellQuote(branch.name)}${note}`);
+      lines.push(branchDeleteCommand(repo.primaryPath, branch, theme));
     }
 
     lines.push('');
   }
-
-  if (lines.length === 0) return lines;
-
-  lines.unshift(
-    'Commands (review before running; none use --force)',
-    theme.muted('A refusal means git disagrees with this tool. Believe git.'),
-    '',
-  );
 
   return lines;
 }
@@ -371,8 +373,10 @@ function formatRemoteStaleness(report, theme) {
   // Only repositories that actually make a remote claim matter here. Measuring
   // every repo on the machine let one cloned-once-in-2022 reference drag the
   // figure to four years and cry wolf about buckets resting on fresh data.
-  const claimingRepos = report.repos.filter((repo) =>
-    repo.worktrees.some((worktree) => worktree.cleanupStatus === 'prune-candidate'),
+  const claimingRepos = report.repos.filter(
+    (repo) =>
+      repo.worktrees.some((worktree) => worktree.cleanupStatus === 'prune-candidate') ||
+      repo.branches.some((branch) => branch.cleanupStatus === 'prune-candidate'),
   );
 
   if (claimingRepos.length === 0) return [];
@@ -383,15 +387,17 @@ function formatRemoteStaleness(report, theme) {
     .filter((value) => Number.isFinite(value));
 
   if (fetchTimes.length === 0) {
-    return [theme.caution('No fetch recorded for the repos claiming "merged". Run git fetch --prune before trusting them.')];
+    return [theme.caution('No fetch recorded. Run git fetch --prune first.')];
   }
 
   const oldestDays = Math.floor((Date.now() - Math.min(...fetchTimes)) / 86_400_000);
-  const scope = claimingRepos.length === 1 ? 'the repo claiming' : `the ${claimingRepos.length} repos claiming`;
-  const unfetchedNote = unfetched > 0 ? ` ${unfetched} recorded no fetch at all.` : '';
-  const message = `"merged" and "gone" rest on the last fetch of ${scope} them; the oldest is ${oldestDays} ${oldestDays === 1 ? 'day' : 'days'} old.${unfetchedNote} This tool never fetches.`;
 
-  return [oldestDays >= 7 || unfetched > 0 ? theme.caution(message) : theme.muted(message)];
+  // Only worth a line when it is old enough to act on. Stamping every run with
+  // its own provenance is the tool narrating at the reader.
+  if (oldestDays < 7 && unfetched === 0) return [];
+
+  const unfetchedNote = unfetched > 0 ? `, ${unfetched} never fetched` : '';
+  return [theme.caution(`Remote data is ${oldestDays} days old${unfetchedNote}. git fetch --prune to refresh.`)];
 }
 
 

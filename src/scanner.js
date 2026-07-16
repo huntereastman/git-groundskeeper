@@ -431,10 +431,11 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
     let mergedVia = null;
 
     // GitHub's own answer outranks anything derived locally.
-    const mergedBase = mergedPullRequests?.get(branch.name);
-    if (mergedBase) {
-      mergedInto = `origin/${mergedBase}`;
+    const pullRequest = mergedPullRequests?.get(branch.name);
+    if (pullRequest) {
+      mergedInto = `origin/${pullRequest.base}`;
       mergedVia = 'pr';
+      branch.pullRequest = pullRequest;
     }
 
     // Ancestry next: cheap, and the common case for merge commits and
@@ -477,6 +478,7 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
     worktree.mergedInto = mergedInto;
     worktree.mergedVia = mergedVia;
     worktree.ancestryVisible = ancestryVisible;
+    worktree.pullRequest = branch.pullRequest ?? null;
   }
 }
 

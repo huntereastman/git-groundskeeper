@@ -74,14 +74,23 @@ export async function listMergedPullRequestBranches(cwd) {
   try {
     const { stdout } = await execFileAsync(
       'gh',
-      ['pr', 'list', '--state', 'merged', '--limit', '200', '--json', 'headRefName,baseRefName'],
+      ['pr', 'list', '--state', 'merged', '--limit', '200', '--json', 'headRefName,baseRefName,number,mergedAt'],
       { cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
     );
 
     const merged = JSON.parse(stdout);
     if (!Array.isArray(merged)) return null;
 
-    return new Map(merged.map((pullRequest) => [pullRequest.headRefName, pullRequest.baseRefName]));
+    return new Map(
+      merged.map((pullRequest) => [
+        pullRequest.headRefName,
+        {
+          base: pullRequest.baseRefName,
+          number: pullRequest.number,
+          mergedAt: (pullRequest.mergedAt ?? '').slice(0, 10),
+        },
+      ]),
+    );
   } catch {
     return null;
   }
