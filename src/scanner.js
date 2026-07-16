@@ -779,7 +779,27 @@ export function classifyTier(worktree, primaryPath) {
   // the reflog, so this is the one clean worktree whose removal can lose work.
   if (worktree.detached && worktree.unreachableCommits > 0) return 'blocked';
   if (worktree.cleanupStatus === 'prune-candidate') return 'worktree-and-branch';
+  // "The branch keeps your commits" is true and not enough. Unpushed work
+  // exists on exactly one disk, and removing its checkout leaves no reminder
+  // that it exists at all: nobody browses a branch list looking for forgotten
+  // work, and a dead SSD takes it with no reflog to appeal to. Reclaiming the
+  // space is fine, but pushing has to come first.
+  if (hasUnpushedWork(worktree)) return 'push-first';
   return 'worktree-only';
+}
+
+function hasUnpushedWork(worktree) {
+  // A detached HEAD has no upstream by definition, so upstream status says
+  // nothing about it either way. Whether its commits exist elsewhere is
+  // answered by unreachableCommits, and that case is blocked above.
+  if (worktree.detached) return false;
+  // Never pushed: the branch exists here and nowhere else.
+  if (worktree.upstreamStatus === 'none') return true;
+  // The remote branch is gone and this is not a merged candidate, so whatever
+  // is here is the only copy left.
+  if (worktree.upstreamStatus === 'gone') return true;
+
+  return Number.isInteger(worktree.ahead) && worktree.ahead > 0;
 }
 
 // Commits reachable from HEAD but from no branch or remote anywhere. Only asked

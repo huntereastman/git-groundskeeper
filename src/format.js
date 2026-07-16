@@ -175,6 +175,12 @@ const TIER_BUCKETS = [
     reclaimable: true,
   },
   {
+    tier: 'push-first',
+    label: 'push first: only copy is here',
+    note: 'git keeps it; you will not find it again',
+    reclaimable: false,
+  },
+  {
     tier: 'blocked',
     label: 'blocked: uncommitted work',
     note: 'removing this loses work',

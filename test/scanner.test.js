@@ -226,6 +226,43 @@ test('a worktree with a checked-out submodule is never proposed for removal', as
   assert.equal(worktree.tier, 'submodule');
 });
 
+test('a clean worktree with unpushed commits is push-first, not safe', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'unpushed');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/unpushed', linked, 'main']);
+  git(linked, ['push', '-u', 'origin', 'feature/unpushed']);
+  fs.writeFileSync(path.join(linked, 'work.txt'), 'work\n');
+  git(linked, ['add', 'work.txt']);
+  git(linked, ['commit', '-m', 'not pushed anywhere']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // The branch does keep the commit, which is why this is not "blocked". But
+  // it exists on one disk with no checkout to remind anyone, so calling it
+  // safe to remove is how work quietly stops existing.
+  assert.equal(worktree.dirty, false);
+  assert.equal(worktree.ahead, 1);
+  assert.equal(worktree.tier, 'push-first');
+});
+
+test('a branch that was never pushed is push-first even with nothing ahead', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'no-upstream');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/never-pushed', linked, 'main']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // No upstream at all: the branch exists here and nowhere else.
+  assert.equal(worktree.upstreamStatus, 'none');
+  assert.equal(worktree.tier, 'push-first');
+});
+
 test('a detached HEAD holding commits on no branch is blocked, not called safe', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'detached-work');
