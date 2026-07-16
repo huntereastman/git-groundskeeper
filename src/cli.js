@@ -166,11 +166,11 @@ function parsePositiveInteger(value, flag) {
 }
 
 function parseCommandsTier(value) {
-  const tiers = { 'worktree-and-branch': 'worktree-and-branch', 'worktree-only': 'worktree-only' };
-  if (!tiers[value]) {
-    throw new Error(`--commands= requires ${Object.keys(tiers).join(' or ')}`);
+  const tiers = ['worktree-and-branch', 'worktree-only', 'branch'];
+  if (!tiers.includes(value)) {
+    throw new Error(`--commands= requires one of: ${tiers.join(', ')}`);
   }
-  return tiers[value];
+  return value;
 }
 
 function parseOwner(value) {
@@ -226,7 +226,7 @@ Options:
   --commands[=tier]      Print the removal commands for the safe buckets, so
                          git re-checks each one. Implies --buckets. Never emits
                          --force or -D. Pass a tier to act on one bucket only:
-                         worktree-and-branch, or worktree-only.
+                         worktree-and-branch, worktree-only, or branch.
   --sizes                Measure each worktree on disk so buckets can total
                          what they reclaim. Adds a du walk per worktree.
   --no-squash-detect     Skip squash-merge detection, which synthesises a

@@ -233,6 +233,8 @@ export function formatTierBuckets(report, theme, tableWidth) {
     lines.push('');
   }
 
+  lines.push(...formatOrphanedBranchBucket(report, theme, tableWidth));
+
   if (lines.length === 0) return lines;
 
   lines.push(
@@ -244,6 +246,49 @@ export function formatTierBuckets(report, theme, tableWidth) {
   lines.push('');
 
   return lines;
+}
+
+// Buckets are built from worktrees, so a merged branch that outlived its
+// checkout appears in none of them. Those are the branches a cleanup pass
+// leaves behind -- the tool would recommend removing worktrees and then go
+// quiet about what that left, which is the one thing it created.
+export function collectOrphanedCandidates(report) {
+  return report.repos
+    .flatMap((repo) => repo.branches.map((branch) => ({ repo, branch })))
+    .filter(({ branch }) => branch.cleanupStatus === 'prune-candidate' && !branch.checkedOut)
+    .sort((a, b) => {
+      const repoCompare = a.repo.primaryPath.localeCompare(b.repo.primaryPath);
+      return repoCompare || a.branch.name.localeCompare(b.branch.name);
+    });
+}
+
+function formatOrphanedBranchBucket(report, theme, tableWidth) {
+  const orphans = collectOrphanedCandidates(report);
+  if (orphans.length === 0) return [];
+
+  const rows = orphans.map(({ repo, branch }) => ({
+    branch: branch.name,
+    repo: shortenPath(repo.primaryPath, report.roots),
+    remote: colorRemote(formatRemoteState({ detached: false }, branch), theme),
+    // -d consults ancestry and nothing else, so this is the only column that
+    // predicts whether the command will work.
+    deletes: branch.ancestryVisible ? theme.ok('-d works') : theme.caution('needs -D'),
+  }));
+
+  return [
+    `${theme.ok('safe: remove branch')} (${orphans.length}) ${theme.muted('- merged; no worktree left')}`,
+    ...renderTable(orphanColumns(), rows, tableWidth, theme),
+    '',
+  ];
+}
+
+function orphanColumns() {
+  return [
+    { key: 'branch', header: 'Branch', minWidth: 20, maxWidth: 44 },
+    { key: 'repo', header: 'Repo', minWidth: 14, maxWidth: 40 },
+    { key: 'remote', header: 'Remote', minWidth: 10, maxWidth: 22 },
+    { key: 'deletes', header: 'Deletes', minWidth: 8, maxWidth: 9, clip: 'end' },
+  ];
 }
 
 // "merged" and "upstream gone" are claims about a remote this tool never
@@ -286,6 +331,22 @@ export function formatCleanupCommands(report, theme, only = null) {
           : theme.muted('  # -d will refuse: squash-merged, only -D works');
         lines.push(`git -C ${shellQuote(repo.primaryPath)} branch -d ${shellQuote(worktree.branch)}${note}`);
       }
+    }
+
+    lines.push('');
+  }
+
+  // Branches that outlived their worktree have no bucket to be emitted from,
+  // so they would silently get no command at all.
+  const orphans = collectOrphanedCandidates(report);
+  if (orphans.length > 0 && (!only || only === 'branch')) {
+    lines.push(theme.muted(`# safe: remove branch (${orphans.length})`));
+
+    for (const { repo, branch } of orphans) {
+      const note = branch.ancestryVisible
+        ? ''
+        : theme.muted('  # -d will refuse: squash-merged, only -D works');
+      lines.push(`git -C ${shellQuote(repo.primaryPath)} branch -d ${shellQuote(branch.name)}${note}`);
     }
 
     lines.push('');

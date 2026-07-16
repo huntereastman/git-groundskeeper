@@ -115,6 +115,35 @@ test('sizes are base 10, matching the free space macOS reports', () => {
   assert.doesNotMatch(text, /0\.9GB/);
 });
 
+test('a merged branch that outlived its worktree is shown and gets a command', () => {
+  const report = createReport();
+
+  report.repos[0].branches.push({
+    name: 'codex/left-behind',
+    upstream: 'origin/codex/left-behind',
+    upstreamStatus: 'gone',
+    ahead: null,
+    behind: null,
+    cleanupStatus: 'prune-candidate',
+    mergedInto: 'origin/dev',
+    mergedVia: 'squash',
+    ancestryVisible: false,
+    checkedOut: false,
+    worktreePath: null,
+  });
+
+  const text = formatScanText(report, { buckets: true, commands: true, all: true });
+
+  // Buckets are built from worktrees, so detecting this branch and then never
+  // showing it is the same as not detecting it. A cleanup pass creates these.
+  assert.match(text, /safe: remove branch \(1\)/);
+  assert.match(text, /\| codex\/left-behind\s+\|/);
+  assert.match(text, /needs -D/);
+
+  const commands = text.split('\n').filter((line) => line.startsWith('git '));
+  assert.ok(commands.some((line) => line.includes("branch -d 'codex/left-behind'")));
+});
+
 test('commands can be scoped to one bucket, so piping them cannot overreach', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
