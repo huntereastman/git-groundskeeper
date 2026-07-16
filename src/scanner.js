@@ -399,12 +399,23 @@ function applyBranchStateToWorktrees(worktrees, branchMap) {
 }
 
 async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) {
+  const worktreeByBranch = new Map(
+    worktrees.filter((worktree) => worktree.branch).map((worktree) => [worktree.branch, worktree]),
+  );
+
+  // A branch is a cleanup candidate on its own merits. Scoping this to branches
+  // that still had a worktree meant removing the worktree made the branch
+  // invisible -- and branches left behind by a cleanup pass are precisely the
+  // ones that need looking at. A branch checked out in a dirty worktree is
+  // still excluded: that worktree's state is the reason to leave it alone.
+  const candidates = [...branchMap.values()].filter((branch) => {
+    if (branch.upstreamStatus !== 'gone') return false;
+    return !worktreeByBranch.get(branch.name)?.dirty;
+  });
+
   // Resolving base refs costs roughly eight Git calls. Most repositories have
   // no candidate at all, so doing it first spent that on every repository on
   // the machine to answer a question with no askers.
-  const candidates = worktrees.filter(
-    (worktree) => worktree.branch && !worktree.dirty && worktree.upstreamStatus === 'gone',
-  );
   if (candidates.length === 0) return;
 
   const baseRefs = await listPruneBaseRefs(cwd);
@@ -415,15 +426,12 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
   // absence falls through to inference.
   const mergedPullRequests = options.prCheck === false ? null : await listMergedPullRequestBranches(cwd);
 
-  for (const worktree of candidates) {
-    const branch = branchMap.get(worktree.branch);
-    if (!branch) continue;
-
+  for (const branch of candidates) {
     let mergedInto = null;
     let mergedVia = null;
 
     // GitHub's own answer outranks anything derived locally.
-    const mergedBase = mergedPullRequests?.get(worktree.branch);
+    const mergedBase = mergedPullRequests?.get(branch.name);
     if (mergedBase) {
       mergedInto = `origin/${mergedBase}`;
       mergedVia = 'pr';
@@ -432,7 +440,7 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
     // Ancestry next: cheap, and the common case for merge commits and
     // fast-forwards.
     for (const baseRef of mergedInto ? [] : baseRefs) {
-      if (await isAncestor(cwd, worktree.branch, baseRef)) {
+      if (await isAncestor(cwd, branch.name, baseRef)) {
         mergedInto = baseRef;
         mergedVia = 'history';
         break;
@@ -441,7 +449,7 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
 
     if (!mergedInto && options.squashDetect !== false) {
       for (const baseRef of baseRefs) {
-        if (await isSquashMerged(cwd, worktree.branch, baseRef)) {
+        if (await isSquashMerged(cwd, branch.name, baseRef)) {
           mergedInto = baseRef;
           mergedVia = 'squash';
           break;
@@ -455,16 +463,20 @@ async function annotatePruneCandidates(cwd, worktrees, branchMap, options = {}) 
     // the merge was proven: -d consults ancestry and nothing else. A pull
     // request can confirm a merge that ancestry cannot see, so this has to be
     // asked directly or the warning lands on every row and means nothing.
-    const ancestryVisible = await isAncestor(cwd, worktree.branch, mergedInto);
+    const ancestryVisible = await isAncestor(cwd, branch.name, mergedInto);
+
+    branch.cleanupStatus = 'prune-candidate';
+    branch.mergedInto = mergedInto;
+    branch.mergedVia = mergedVia;
+    branch.ancestryVisible = ancestryVisible;
+
+    const worktree = worktreeByBranch.get(branch.name);
+    if (!worktree) continue;
 
     worktree.cleanupStatus = 'prune-candidate';
     worktree.mergedInto = mergedInto;
     worktree.mergedVia = mergedVia;
     worktree.ancestryVisible = ancestryVisible;
-    branch.cleanupStatus = 'prune-candidate';
-    branch.mergedInto = mergedInto;
-    branch.mergedVia = mergedVia;
-    branch.ancestryVisible = ancestryVisible;
   }
 }
 

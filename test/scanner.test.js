@@ -281,6 +281,36 @@ test('scanRoots detects squash-merged branches that share no history with the ba
   assert.equal(worktree.ancestryVisible, false);
 });
 
+test('a merged branch with no worktree is still found, which is what a prune leaves behind', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'temporary');
+
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/left-behind', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'work.txt'), 'work\n');
+  git(linked, ['add', 'work.txt']);
+  git(linked, ['commit', '-m', 'the work']);
+  git(linked, ['push', '-u', 'origin', 'feature/left-behind']);
+  git(fixture.repo, ['merge', '--squash', 'feature/left-behind']);
+  git(fixture.repo, ['commit', '-m', 'squashed (#7)']);
+  git(fixture.repo, ['push', 'origin', 'main']);
+  git(fixture.repo, ['push', 'origin', '--delete', 'feature/left-behind']);
+  git(fixture.repo, ['fetch', '--prune', 'origin']);
+
+  // Exactly what a cleanup pass produces: the worktree is gone, the branch is
+  // not. Scoping candidate detection to worktrees made these invisible the
+  // moment they became the only thing left to clean up.
+  git(fixture.repo, ['worktree', 'remove', linked]);
+
+  const report = await scanRoots([fixture.repo], { maxDepth: 1 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const branch = repo.branches.find((candidate) => candidate.name === 'feature/left-behind');
+
+  assert.ok(branch, 'the branch outlived its worktree and must still be examined');
+  assert.equal(branch.cleanupStatus, 'prune-candidate');
+  assert.equal(branch.mergedVia, 'squash');
+  assert.equal(branch.ancestryVisible, false);
+});
+
 test('squash detection can be disabled to keep the scan strictly read-only', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'squashed-optout');
