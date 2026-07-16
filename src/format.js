@@ -175,6 +175,12 @@ const TIER_BUCKETS = [
     reclaimable: true,
   },
   {
+    tier: 'check-first',
+    label: 'check first: unique files here',
+    note: 'unversioned, and on no other disk',
+    reclaimable: false,
+  },
+  {
     tier: 'push-first',
     label: 'push first: only copy is here',
     note: 'git keeps it; you will not find it again',

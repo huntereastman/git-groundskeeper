@@ -785,6 +785,11 @@ export function classifyTier(worktree, primaryPath) {
   // work, and a dead SSD takes it with no reflog to appeal to. Reclaiming the
   // space is fine, but pushing has to come first.
   if (hasUnpushedWork(worktree)) return 'push-first';
+  // A bucket is an action group, and these need an action first: look at the
+  // file, then decide. Leaving them among the plain-safe rows meant piping the
+  // bucket's commands deleted them without pause, which made the whole Keeps
+  // column decoration -- a warning that vanishes at the moment of acting.
+  if (worktree.preciousIgnored?.length > 0) return 'check-first';
   return 'worktree-only';
 }
 

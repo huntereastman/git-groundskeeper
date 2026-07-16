@@ -157,6 +157,26 @@ test('a merged branch that outlived its worktree is shown and gets a command', (
   assert.match(text, /PR #198 merged to dev 2026-06-25/);
 });
 
+test('a worktree holding unique files is not swept along by the safe bucket', () => {
+  const report = createReport();
+  const worktrees = report.repos[0].worktrees;
+
+  worktrees[0].tier = 'blocked';
+  worktrees[1].tier = 'worktree-only';
+  worktrees[2].tier = 'check-first';
+  worktrees[2].preciousIgnored = ['assets/.env'];
+
+  const text = formatScanText(report, { buckets: true, commands: true, all: true });
+  const commands = text.split('\n').filter((line) => line.startsWith('git '));
+
+  // The Keeps warning lived only in the table, so piping the safe bucket's
+  // commands deleted the file it warned about. A bucket is an action group:
+  // needing a look first makes this a different action, not a footnote.
+  assert.match(text, /check first: unique files here \(1\)/);
+  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")), false);
+  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")));
+});
+
 test('commands can be scoped to one bucket, so piping them cannot overreach', () => {
   const report = createReport();
   const worktrees = report.repos[0].worktrees;
