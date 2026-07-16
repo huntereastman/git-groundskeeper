@@ -573,6 +573,9 @@ function formatChanges(worktree) {
 
 function formatNeeds(worktree, branch) {
   const needs = [];
+  if (worktree.unreachableCommits > 0) {
+    needs.push(`${worktree.unreachableCommits} commits on no branch`);
+  }
   if (worktree.inProgress) needs.push(`finish ${worktree.inProgress}`);
   if (worktree.locked) needs.push('locked');
   // Name the submodule's branch, not just its presence: whether the parent

@@ -299,6 +299,7 @@ async function scanWorktree(worktreePath, options, primaryPath) {
     path: worktreePath,
     bytes,
     tier: null,
+    unreachableCommits: branch ? 0 : await countUnreachableCommits(worktreePath),
     locked: isLockedWorktree(gitDir),
     inProgress: detectInProgress(gitDir),
     submodules: dirty ? [] : await listInitialisedSubmodules(worktreePath),
@@ -772,8 +773,23 @@ export function classifyTier(worktree, primaryPath) {
   // whose merge state says nothing about the parent's, and nothing here looks
   // inside it.
   if (worktree.submodules?.length > 0) return 'submodule';
+  // "Removing a worktree keeps your commits, the branch holds them" is the
+  // whole basis of the worktree-only bucket -- and it is false for a detached
+  // HEAD, where no branch holds anything. Unique commits there survive only in
+  // the reflog, so this is the one clean worktree whose removal can lose work.
+  if (worktree.detached && worktree.unreachableCommits > 0) return 'blocked';
   if (worktree.cleanupStatus === 'prune-candidate') return 'worktree-and-branch';
   return 'worktree-only';
+}
+
+// Commits reachable from HEAD but from no branch or remote anywhere. Only asked
+// of a detached HEAD, where the answer can be nonzero.
+async function countUnreachableCommits(cwd) {
+  const result = await git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--branches', '--remotes']);
+  if (!result.ok) return 0;
+
+  const count = Number.parseInt(result.stdout.trim(), 10);
+  return Number.isFinite(count) ? count : 0;
 }
 
 // Read from .gitmodules rather than asking git, so this costs no process. An

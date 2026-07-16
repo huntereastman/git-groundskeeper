@@ -226,6 +226,44 @@ test('a worktree with a checked-out submodule is never proposed for removal', as
   assert.equal(worktree.tier, 'submodule');
 });
 
+test('a detached HEAD holding commits on no branch is blocked, not called safe', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'detached-work');
+
+  git(fixture.repo, ['worktree', 'add', '--detach', linked, 'main']);
+  fs.writeFileSync(path.join(linked, 'orphan.txt'), 'only here\n');
+  git(linked, ['add', 'orphan.txt']);
+  git(linked, ['commit', '-m', 'work with no branch to hold it']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // The worktree-only bucket rests on "the branch keeps your commits". Here no
+  // branch does: remove this and the commit survives only in the reflog. It is
+  // clean, so every other check calls it safe.
+  assert.equal(worktree.dirty, false);
+  assert.equal(worktree.detached, true);
+  assert.equal(worktree.unreachableCommits, 1);
+  assert.equal(worktree.tier, 'blocked');
+});
+
+test('a detached HEAD parked on an existing branch is still removable', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'detached-parked');
+
+  git(fixture.repo, ['worktree', 'add', '--detach', linked, 'main']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // Detached is not itself dangerous. Detached with nowhere else to find the
+  // commits is. Blocking every detached HEAD would be the usual false alarm.
+  assert.equal(worktree.unreachableCommits, 0);
+  assert.equal(worktree.tier, 'worktree-only');
+});
+
 test('a locked worktree is never proposed for removal', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'locked-worktree');
