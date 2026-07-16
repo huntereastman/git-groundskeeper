@@ -181,6 +181,12 @@ const TIER_BUCKETS = [
     reclaimable: false,
   },
   {
+    tier: 'submodule',
+    label: 'blocked: submodule checked out',
+    note: 'git refuses; check the submodule branch',
+    reclaimable: false,
+  },
+  {
     tier: 'primary',
     label: 'primary checkout',
     note: 'never removed',
@@ -502,6 +508,11 @@ function formatNeeds(worktree, branch) {
   const needs = [];
   if (worktree.inProgress) needs.push(`finish ${worktree.inProgress}`);
   if (worktree.locked) needs.push('locked');
+  // Name the submodule's branch, not just its presence: whether the parent
+  // merged says nothing about whether that branch did, and nothing here checks.
+  for (const submodule of worktree.submodules ?? []) {
+    needs.push(submodule.branch ? `submodule on ${submodule.branch}` : `submodule ${submodule.path}`);
+  }
   if (worktree.dirty) needs.push('commit');
   if (worktree.detached) needs.push('attach branch');
   if (Number.isInteger(branch?.ahead) && branch.ahead > 0) needs.push('push');

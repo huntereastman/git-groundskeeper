@@ -203,6 +203,29 @@ test('a worktree paused mid-rebase is blocked even though it looks clean', async
   assert.equal(worktree.tier, 'blocked');
 });
 
+test('a worktree with a checked-out submodule is never proposed for removal', async () => {
+  const fixture = createFixture();
+  const adminSource = path.join(fixture.parent, 'admin-source');
+  const linked = path.join(fixture.parent, 'has-submodule');
+
+  createStandaloneRepo(adminSource);
+  git(fixture.repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', adminSource, 'admin']);
+  git(fixture.repo, ['commit', '-m', 'add admin submodule']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/subs', linked, 'main']);
+  git(linked, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', 'admin']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 3 });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  // `git worktree remove` fails outright here: "working trees containing
+  // submodules cannot be moved or removed". Offering it proposes a command
+  // that cannot work, and the submodule's own branch is unexamined besides.
+  assert.equal(worktree.submodules.length, 1);
+  assert.equal(worktree.submodules[0].path, 'admin');
+  assert.equal(worktree.tier, 'submodule');
+});
+
 test('a locked worktree is never proposed for removal', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'locked-worktree');

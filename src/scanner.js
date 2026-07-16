@@ -301,6 +301,7 @@ async function scanWorktree(worktreePath, options, primaryPath) {
     tier: null,
     locked: isLockedWorktree(gitDir),
     inProgress: detectInProgress(gitDir),
+    submodules: dirty ? [] : await listInitialisedSubmodules(worktreePath),
     preciousIgnored,
     branch: branch ?? null,
     detached: branch === null,
@@ -751,8 +752,46 @@ export function classifyTier(worktree, primaryPath) {
   // while the operation's state lives in the worktree's git dir. Removing it
   // throws that away silently.
   if (worktree.inProgress) return 'blocked';
+  // `git worktree remove` refuses outright: "working trees containing
+  // submodules cannot be moved or removed". Proposing one is proposing a
+  // command that cannot work. Worse, the submodule carries a branch of its own
+  // whose merge state says nothing about the parent's, and nothing here looks
+  // inside it.
+  if (worktree.submodules?.length > 0) return 'submodule';
   if (worktree.cleanupStatus === 'prune-candidate') return 'worktree-and-branch';
   return 'worktree-only';
+}
+
+// Read from .gitmodules rather than asking git, so this costs no process. An
+// entry with an empty directory was never initialised and does not block
+// removal; only a populated one does.
+async function listInitialisedSubmodules(worktreePath) {
+  let declared;
+  try {
+    declared = fs.readFileSync(path.join(worktreePath, '.gitmodules'), 'utf8');
+  } catch {
+    return [];
+  }
+
+  const submodules = [];
+
+  for (const match of declared.matchAll(/^\s*path\s*=\s*(.+)$/gm)) {
+    const submodulePath = match[1].trim();
+    const absolute = path.join(worktreePath, submodulePath);
+
+    try {
+      if (fs.readdirSync(absolute).length === 0) continue;
+    } catch {
+      continue;
+    }
+
+    // The submodule's own branch is the thing the parent's merge state cannot
+    // speak for, so it is worth naming.
+    const branch = (await git(absolute, ['branch', '--show-current'])).stdout.trim();
+    submodules.push({ path: submodulePath, branch: branch || null });
+  }
+
+  return submodules;
 }
 
 // A linked worktree's .git is a file pointing at the real git dir; the primary
