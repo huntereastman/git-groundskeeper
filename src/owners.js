@@ -65,32 +65,83 @@ async function ghLines(args) {
   }
 }
 
-// "upstream gone plus the content is on the base" is an inference. GitHub knows
-// the actual answer: whether a pull request for this branch was merged, and
-// into what. Returns null when gh cannot answer -- missing, unauthenticated,
-// offline, or not a GitHub remote -- so callers fall back to inference rather
-// than treating silence as "not merged".
+// Local ancestry can prove that commits landed, but GitHub supplies the useful
+// audit trail: whether a pull request for this branch was merged, and into
+// what. Returns null when gh cannot answer -- missing, unauthenticated,
+// offline, or not a GitHub remote -- so callers preserve "unknown" rather than
+// treating silence as "not merged".
 export async function listMergedPullRequestBranches(cwd) {
   try {
     const { stdout } = await execFileAsync(
       'gh',
-      ['pr', 'list', '--state', 'merged', '--limit', '200', '--json', 'headRefName,baseRefName,number,mergedAt'],
+      ['pr', 'list', '--state', 'merged', '--limit', '200', '--json', 'headRefName,headRefOid,baseRefName,number,mergedAt'],
       { cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
     );
 
     const merged = JSON.parse(stdout);
     if (!Array.isArray(merged)) return null;
 
-    return new Map(
-      merged.map((pullRequest) => [
-        pullRequest.headRefName,
-        {
-          base: pullRequest.baseRefName,
-          number: pullRequest.number,
-          mergedAt: (pullRequest.mergedAt ?? '').slice(0, 10),
-        },
-      ]),
+    const byBranch = new Map();
+    for (const pullRequest of merged) {
+      const candidate = {
+        base: pullRequest.baseRefName,
+        head: pullRequest.headRefOid,
+        number: pullRequest.number,
+        mergedAt: (pullRequest.mergedAt ?? '').slice(0, 10),
+      };
+      const existing = byBranch.get(pullRequest.headRefName);
+      if (!existing || candidate.mergedAt > existing.mergedAt) {
+        byBranch.set(pullRequest.headRefName, candidate);
+      }
+    }
+
+    return byBranch;
+  } catch {
+    return null;
+  }
+}
+
+// A clean checkout can still be active work: an open draft PR is an explicit
+// repository-level WIP marker. Keep this evidence separate from merged PRs so
+// it can block operational cleanup without ever being mistaken for proof that
+// the branch landed.
+export async function listOpenDraftPullRequestBranches(cwd) {
+  try {
+    const { stdout } = await execFileAsync(
+      'gh',
+      [
+        'pr',
+        'list',
+        '--state',
+        'open',
+        '--draft',
+        '--limit',
+        '200',
+        '--json',
+        'headRefName,headRefOid,baseRefName,number,updatedAt,url',
+      ],
+      { cwd, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
     );
+
+    const drafts = JSON.parse(stdout);
+    if (!Array.isArray(drafts)) return null;
+
+    const byBranch = new Map();
+    for (const pullRequest of drafts) {
+      const candidate = {
+        base: pullRequest.baseRefName,
+        head: pullRequest.headRefOid,
+        number: pullRequest.number,
+        updatedAt: (pullRequest.updatedAt ?? '').slice(0, 10),
+        url: pullRequest.url,
+      };
+      const existing = byBranch.get(pullRequest.headRefName);
+      if (!existing || candidate.updatedAt > existing.updatedAt) {
+        byBranch.set(pullRequest.headRefName, candidate);
+      }
+    }
+
+    return byBranch;
   } catch {
     return null;
   }

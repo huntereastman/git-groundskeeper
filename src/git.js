@@ -12,8 +12,10 @@ export async function git(cwd, args, options = {}) {
       cwd,
       encoding: options.encoding ?? 'utf8',
       maxBuffer: options.maxBuffer ?? 20 * 1024 * 1024,
+      timeout: options.timeoutMs,
       // Never let a repository with a misconfigured remote block the scan on
-      // a credential prompt. Everything this tool runs is local and read-only.
+      // a credential prompt. Remote probes are read-only and bounded; they do
+      // not fetch or update any refs in the repository.
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
 
