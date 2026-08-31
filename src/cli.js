@@ -5,6 +5,12 @@ import { formatScanText } from './format.js';
 import { createProgressReporter } from './progress.js';
 import { formatReclaimText, scanReclaimRoots } from './reclaim.js';
 import { formatDiskPressureText, scanDiskPressure } from './disk-pressure.js';
+import {
+  attachToolProvenance,
+  formatToolProvenance,
+  getToolProvenance,
+} from './provenance.js';
+import { formatRetireText, retireWorktree } from './retire.js';
 
 const DEFAULT_INTERVAL_SECONDS = 15;
 
@@ -16,8 +22,21 @@ export async function runCli(argv) {
     return;
   }
 
+  if (options.version) {
+    console.log(formatToolProvenance(getToolProvenance()));
+    return;
+  }
+
+  if (command === 'retire') {
+    const report = attachToolProvenance(await retireWorktree(roots[0], options));
+    if (options.json) console.log(JSON.stringify(report, null, 2));
+    else console.log(withToolProvenance(formatRetireText(report), report));
+    process.exitCode = ['blocked', 'partial'].includes(report.status) ? 1 : 0;
+    return;
+  }
+
   if (command === 'reclaim' || command === 'session-complete') {
-    const report = await scanReclaimRoots(roots, options);
+    const report = attachToolProvenance(await scanReclaimRoots(roots, options));
     printReclaimReport(report, options);
     const applyFailed = report.apply
       && (report.summary.blockedCount > 0 || report.summary.partialCount > 0);
@@ -26,9 +45,9 @@ export async function runCli(argv) {
   }
 
   if (command === 'disk-pressure') {
-    const report = await scanDiskPressure(roots, options);
+    const report = attachToolProvenance(await scanDiskPressure(roots, options));
     if (options.json) console.log(JSON.stringify(report, null, 2));
-    else console.log(formatDiskPressureText(report));
+    else console.log(withToolProvenance(formatDiskPressureText(report), report));
     const applyFailed = report.apply
       && report.pressureDetected
       && (report.reclaim.summary.blockedCount > 0 || report.reclaim.summary.partialCount > 0);
@@ -59,7 +78,7 @@ export async function runCli(argv) {
     }
 
     if (command === 'scan' || command === 'status') {
-      const report = await scanRoots(roots, options);
+      const report = attachToolProvenance(await scanRoots(roots, options));
       printReport(report, options);
       process.exitCode = options.failOnAttention && report.summary.attentionCount > 0 ? 1 : 0;
       return;
@@ -69,7 +88,7 @@ export async function runCli(argv) {
       const intervalMs = options.intervalSeconds * 1000;
       // eslint-disable-next-line no-constant-condition
       while (true) {
-        const report = await scanRoots(roots, options);
+        const report = attachToolProvenance(await scanRoots(roots, options));
         console.clear();
         printReport(report, options);
         await delay(intervalMs);
@@ -104,6 +123,7 @@ function parseArgs(argv) {
     progressWave: false,
     failOnAttention: false,
     help: false,
+    version: false,
     maxDepth: 8,
     largeFileBytes: 10 * 1024 * 1024,
     untrackedFiles: 'normal',
@@ -111,6 +131,7 @@ function parseArgs(argv) {
     keepsDetails: false,
     commands: false,
     sizes: false,
+    scopeStrict: false,
     squashDetect: true,
     liveRemoteCheck: true,
     owners: [],
@@ -125,6 +146,7 @@ function parseArgs(argv) {
     excludePrimary: false,
     worktreesOnly: false,
     minAgeMinutes: 10,
+    minAgeOptionUsed: false,
     explicitRoots: false,
     reclaimOptionUsed: false,
     diskPressureOptionUsed: false,
@@ -132,6 +154,8 @@ function parseArgs(argv) {
     workflowRoots: [],
     workflowRefs: [],
     minFreeGb: null,
+    retainBranch: false,
+    retireOptionUsed: false,
   };
 
   while (args.length > 0) {
@@ -196,6 +220,8 @@ function parseArgs(argv) {
       options.commandsTier = parseCommandsTier(arg.split('=')[1]);
     } else if (arg === '--sizes') {
       options.sizes = true;
+    } else if (arg === '--scope-strict') {
+      options.scopeStrict = true;
     } else if (arg === '--no-squash-detect') {
       options.squashDetect = false;
     } else if (arg === '--no-pr-check') {
@@ -206,6 +232,8 @@ function parseArgs(argv) {
       options.failOnAttention = true;
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
+    } else if (arg === '--version' || arg === '-V') {
+      options.version = true;
     } else if (arg === '--max-depth') {
       options.maxDepth = parsePositiveInteger(args.shift(), '--max-depth');
     } else if (arg.startsWith('--max-depth=')) {
@@ -246,6 +274,9 @@ function parseArgs(argv) {
     } else if (arg === '--yes') {
       options.yes = true;
       options.reclaimOptionUsed = true;
+    } else if (arg === '--retain-branch') {
+      options.retainBranch = true;
+      options.retireOptionUsed = true;
     } else if (arg === '--full-clean') {
       options.fullClean = true;
       options.reclaimOptionUsed = true;
@@ -258,6 +289,7 @@ function parseArgs(argv) {
       options.reclaimOptionUsed = true;
     } else if (arg === '--min-age-minutes') {
       options.minAgeMinutes = parseNonNegativeInteger(args.shift(), '--min-age-minutes');
+      options.minAgeOptionUsed = true;
       options.reclaimOptionUsed = true;
     } else if (arg === '--workflow-root') {
       options.workflowRoots.push(parseValue(args.shift(), '--workflow-root'));
@@ -279,6 +311,7 @@ function parseArgs(argv) {
       options.diskPressureOptionUsed = true;
     } else if (arg.startsWith('--min-age-minutes=')) {
       options.minAgeMinutes = parseNonNegativeInteger(arg.split('=')[1], '--min-age-minutes');
+      options.minAgeOptionUsed = true;
       options.reclaimOptionUsed = true;
     } else if (arg.startsWith('-')) {
       throw new Error(`Unknown option: ${arg}`);
@@ -294,8 +327,23 @@ function parseArgs(argv) {
     options.tool = 'auto';
   }
 
-  if (!['reclaim', 'session-complete', 'disk-pressure'].includes(command) && (options.reclaimOptionUsed || options.diskPressureOptionUsed)) {
-    throw new Error('--tool, --apply, --yes, --full-clean, --exclude-primary, --worktrees-only, --min-age-minutes, --workflow-root, --workflow-ref, and --min-free-gb are only valid with reclaim or disk-pressure.');
+  if (command === 'retire' && roots.length !== 1) {
+    throw new Error('retire requires exactly one explicit worktree path.');
+  }
+
+  if (!['reclaim', 'session-complete', 'disk-pressure', 'retire'].includes(command) && (options.reclaimOptionUsed || options.diskPressureOptionUsed)) {
+    throw new Error('--tool, --apply, --yes, --full-clean, --exclude-primary, --worktrees-only, --min-age-minutes, --workflow-root, --workflow-ref, and --min-free-gb are only valid with reclaim, retire, or disk-pressure.');
+  }
+  if (command !== 'retire' && options.retireOptionUsed) {
+    throw new Error('--retain-branch is only valid with retire.');
+  }
+  if (command === 'retire') {
+    if (options.toolOptionUsed || options.fullClean || options.excludePrimary || options.worktreesOnly || options.minAgeOptionUsed || options.workflowRoots.length > 0 || options.workflowRefs.length > 0 || options.diskPressureOptionUsed) {
+      throw new Error('retire accepts scan evidence options plus --retain-branch --apply --yes; reclaim and disk-pressure options are not valid.');
+    }
+    if (options.apply && !options.retainBranch) {
+      throw new Error('Worktree retirement requires the explicit --retain-branch policy.');
+    }
   }
   if (command === 'disk-pressure' && (options.fullClean || options.workflowRoots.length > 0 || options.workflowRefs.length > 0)) {
     throw new Error('disk-pressure manages linked-worktree caches only; --full-clean, --workflow-root, and --workflow-ref are not valid.');
@@ -306,11 +354,15 @@ function parseArgs(argv) {
   if (command !== 'disk-pressure' && options.diskPressureOptionUsed) {
     throw new Error('--min-free-gb is only valid with disk-pressure.');
   }
-  if (command === 'reclaim' || command === 'session-complete' || command === 'disk-pressure') {
-    if (options.apply && !options.yes) throw new Error('Permanent reclaim requires --apply --yes.');
+  if (command === 'reclaim' || command === 'session-complete' || command === 'disk-pressure' || command === 'retire') {
+    if (options.apply && !options.yes) {
+      throw new Error(command === 'retire'
+        ? 'Worktree retirement requires --apply --yes.'
+        : 'Permanent reclaim requires --apply --yes.');
+    }
     if (options.yes && !options.apply) throw new Error('--yes is only valid with --apply.');
     if (options.apply && !options.explicitRoots) {
-      throw new Error('Permanent reclaim requires at least one explicit root.');
+      throw new Error('Permanent action requires at least one explicit root.');
     }
   }
 
@@ -378,7 +430,7 @@ function printReport(report, options) {
     return;
   }
 
-  console.log(formatScanText(report, options));
+  console.log(withToolProvenance(formatScanText(report, options), report));
 }
 
 function printReclaimReport(report, options) {
@@ -387,7 +439,11 @@ function printReclaimReport(report, options) {
     return;
   }
 
-  console.log(formatReclaimText(report));
+  console.log(withToolProvenance(formatReclaimText(report), report));
+}
+
+function withToolProvenance(text, report) {
+  return `${text}\n\nTool: ${formatToolProvenance(report.provenance)}`;
 }
 
 function printHelp() {
@@ -400,6 +456,8 @@ Usage:
   git-groundskeeper reclaim [roots...] [options]
   git-groundskeeper session-complete <worktree> [options]
   git-groundskeeper disk-pressure [roots...] [options]
+  git-groundskeeper retire <worktree> [options]
+  git-groundskeeper --version
 
 Roots default to your home directory, so a bare scan discovers every
 repository on the machine with no prior knowledge of its layout. Pass roots
@@ -449,9 +507,12 @@ Options:
                          worktree-and-branch, worktree-only, or branch.
   --sizes                Measure every discovered worktree, including primary,
                          dirty, and blocked rows. Adds a du walk per worktree.
-  --no-squash-detect     Skip squash-merge detection, which synthesises a
-                         dangling commit to compare content. Keeps the scan
-                         strictly read-only; misses squash-merged branches.
+  --scope-strict         With --sizes, measure only worktrees inside the exact
+                         requested roots. Repository-wide Git safety metadata
+                         is still inspected so outside checkouts stay visible.
+  --no-squash-detect     Skip squash-merge content comparison. Scans are
+                         read-only either way; this faster mode can miss
+                         squash-merged branches.
   --no-pr-check          Skip live GitHub merged-PR and open-draft WIP
                          evidence. Integrated live branches stay in the
                          retain-branch bucket; gone upstreams fall back to
@@ -468,6 +529,7 @@ Options:
   --refresh-owners       Re-query gh instead of using the cached owners.
   --concurrency <n>      Git calls in flight. Default: available parallelism.
   --interval <seconds>   Watch interval. Default: 15.
+  -V, --version          Print version, commit, dirty state, and source mode.
   -h, --help             Show help.
 
 Reclaim options:
@@ -496,6 +558,16 @@ Session completion:
   read-only by default and never removes the worktree or branches. Add
   --apply --yes to reclaim only proven generated output after revalidation.
 
+Worktree retirement:
+  retire plans one exact linked-worktree removal and is read-only by default.
+  It rechecks cleanliness, ignored content, branch and full HEAD, locks, Git
+  operations, submodules, detached retention, and active processes. Apply
+  requires --retain-branch --apply --yes; branch deletion is never performed.
+
+Retire options:
+  --retain-branch        Explicitly preserve the attached branch. Required
+                         with --apply; detached HEADs receive a safety branch.
+
 Examples:
   git-groundskeeper scan
   git-groundskeeper scan --details
@@ -518,6 +590,8 @@ Examples:
   git-groundskeeper disk-pressure ~/Development --min-free-gb 20 --apply --yes
   git-groundskeeper session-complete ~/Development/MyApp-worktrees/feature
   git-groundskeeper session-complete ~/Development/MyApp-worktrees/feature --apply --yes
+  git-groundskeeper retire ~/Development/MyApp-worktrees/feature --retain-branch
+  git-groundskeeper retire ~/Development/MyApp-worktrees/feature --retain-branch --apply --yes
   git-groundskeeper reclaim ~/Development/codex-island --tool xcode --apply --yes
 `);
 }

@@ -235,7 +235,11 @@ export async function scanRoots(roots, options = {}) {
   // a single repository with 71 worktrees would otherwise straggle while the
   // rest of the pool sat idle.
   const worktreeJobs = selectedRepos.flatMap((repo) =>
-    repo.worktreePathsSorted.map((worktreePath) => ({ repo, worktreePath })),
+    repo.worktreePathsSorted.map((worktreePath) => ({
+      repo,
+      worktreePath,
+      measureSize: !options.scopeStrict || isInsideAnyScanRoot(worktreePath, normalizedRoots),
+    })),
   );
 
   let scannedWorktreeCount = 0;
@@ -243,10 +247,10 @@ export async function scanRoots(roots, options = {}) {
   const scannedWorktrees = await mapWithConcurrency(
     worktreeJobs,
     concurrency,
-    async ({ repo, worktreePath }) => {
+    async ({ repo, worktreePath, measureSize }) => {
       const worktree = await scanWorktree(
         worktreePath,
-        options,
+        { ...options, sizes: options.sizes && measureSize },
         repo.primaryPath,
         repo.ignoredContentPolicy,
       );
@@ -518,10 +522,14 @@ async function finishRepo(repo, worktrees, options) {
   // repository's default branch is master. Keep those separate: cleanup still
   // uses the integration base, while the report names whether the exact tip is
   // also contained in the remote default branch.
-  const primaryBranch = options.buckets
+  const needsPrimaryBranchEvidence = options.buckets && worktrees.some(
+    (worktree) => worktree.path !== primaryPath
+      && ['worktree-only', 'worktree-and-branch', 'push-first'].includes(worktree.tier),
+  );
+  const primaryBranch = needsPrimaryBranchEvidence
     ? await inspectPrimaryBranch(primaryPath, options)
     : emptyPrimaryBranchEvidence();
-  if (options.buckets) {
+  if (needsPrimaryBranchEvidence) {
     await annotatePrimaryBranchContainment(primaryPath, worktrees, branchMap, primaryBranch);
   }
 
@@ -944,9 +952,9 @@ async function scanWorktree(worktreePath, options, primaryPath, ignoredContentPo
       inspectionErrors.push(inspectionError('submodules', error));
     }
   }
-  // --sizes is deliberately literal: Git safety state determines whether a
-  // checkout may be removed, not whether its on-disk footprint is useful to
-  // the person reviewing the report. `du` failures remain unknown (`null`).
+  // --sizes is deliberately independent of cleanup eligibility. With
+  // --scope-strict, scanRoots turns it off only for registered worktrees beyond
+  // the exact requested roots; their repository-wide Git metadata is retained.
   const bytes = options.sizes
     ? await measureDiskUsageBytes(worktreePath)
     : null;
@@ -1362,11 +1370,9 @@ async function refExists(cwd, ref) {
 // patch already exists on the base. That is the same shape the squash produced,
 // so their patch ids match.
 //
-// This is the one write the tool performs. The synthesised commit is dangling,
-// referenced by nothing, and collected by the next `git gc`; no existing object
-// or ref is modified. It runs only for branches that are already clean and
-// already gone from the remote. Pass squashDetect: false to keep the scan
-// strictly read-only, at the cost of missing squash-merged branches.
+// The synthetic object lives in a temporary object directory with the real
+// object database mounted read-only as an alternate. The repository's object
+// database and refs therefore remain unchanged even when detection is enabled.
 async function isSquashMerged(cwd, branch, baseRef) {
   const mergeBase = (await git(cwd, ['merge-base', baseRef, branch])).stdout.trim();
   if (!mergeBase) return false;
@@ -1374,15 +1380,36 @@ async function isSquashMerged(cwd, branch, baseRef) {
   const tree = (await git(cwd, ['rev-parse', `${branch}^{tree}`])).stdout.trim();
   if (!tree) return false;
 
-  const synthesised = await git(cwd, ['commit-tree', tree, '-p', mergeBase, '-m', 'git-groundskeeper probe']);
-  if (!synthesised.ok) return false;
+  const objects = await git(cwd, ['rev-parse', '--path-format=absolute', '--git-path', 'objects']);
+  if (!objects.ok || !objects.stdout.trim()) return false;
 
-  const cherry = await git(cwd, ['cherry', baseRef, synthesised.stdout.trim()]);
-  if (!cherry.ok) return false;
+  const temporaryObjects = fs.mkdtempSync(path.join(os.tmpdir(), 'git-groundskeeper-objects-'));
+  const alternates = [
+    objects.stdout.trim(),
+    process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES,
+  ].filter(Boolean).join(path.delimiter);
+  const env = {
+    GIT_OBJECT_DIRECTORY: temporaryObjects,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates,
+  };
 
-  // `git cherry` prints "- <sha>" when an equivalent patch is already upstream
-  // and "+ <sha>" when it is not.
-  return cherry.stdout.trim().startsWith('-');
+  try {
+    const synthesised = await git(
+      cwd,
+      ['commit-tree', tree, '-p', mergeBase, '-m', 'git-groundskeeper probe'],
+      { env },
+    );
+    if (!synthesised.ok) return false;
+
+    const cherry = await git(cwd, ['cherry', baseRef, synthesised.stdout.trim()], { env });
+    if (!cherry.ok) return false;
+
+    // `git cherry` prints "- <sha>" when an equivalent patch is already upstream
+    // and "+ <sha>" when it is not.
+    return cherry.stdout.trim().startsWith('-');
+  } finally {
+    fs.rmSync(temporaryObjects, { recursive: true, force: true });
+  }
 }
 
 async function isAncestor(cwd, maybeAncestor, descendant) {
@@ -2900,4 +2927,9 @@ function uniquePathsByIdentity(paths, identityResolver) {
 function canonicalPath(candidatePath) {
   const absolute = path.resolve(candidatePath);
   return safeRealpath(absolute) ?? absolute;
+}
+
+function isInsideAnyScanRoot(candidatePath, roots) {
+  const candidate = canonicalPath(candidatePath);
+  return roots.some((root) => candidate === root || candidate.startsWith(`${root}${path.sep}`));
 }

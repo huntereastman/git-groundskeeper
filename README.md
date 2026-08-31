@@ -104,7 +104,35 @@ git-groundskeeper watch ~/Development --interval 30
 git-groundskeeper reclaim ~/Development --tool flutter
 git-groundskeeper reclaim ~/Development --tool xcode
 git-groundskeeper session-complete /path/to/worktree
+git-groundskeeper retire /path/to/worktree --retain-branch
+git-groundskeeper --version
 ```
+
+Every text and JSON report includes tool provenance: package version, source
+commit, dirty state, and whether the command is running from a development
+checkout or a packaged install. Keep `git-groundskeeper` installed from a
+package for stable operations; use `npm run dev -- ...` (or a separate local
+`git-groundskeeper-dev` launcher) when deliberately testing checkout changes.
+
+## Retire one worktree
+
+`retire` is the single-path, branch-preserving operator workflow. Its default
+is a read-only receipt. It rechecks the exact branch and full HEAD, Git status,
+ignored content, locks, in-progress operations, submodules, detached retention,
+and active processes immediately before ordinary `git worktree remove`.
+
+```bash
+# Inspect and save the structured evidence receipt.
+git-groundskeeper retire /path/to/worktree --retain-branch --json
+
+# After confirming the owning task is inactive, remove only this checkout.
+git-groundskeeper retire /path/to/worktree --retain-branch --apply --yes
+```
+
+The apply form never forces removal and never deletes local or remote branches.
+A detached checkout first receives a visible
+`git-groundskeeper/retained-detached/<object-id>` safety branch. Any changed or
+unknown evidence blocks the action and leaves the path in place.
 
 ## Reclaim Flutter build output
 
@@ -390,6 +418,10 @@ deletes the ref only if it still points at the exact scanned object ID. A moved
 branch, a changed base relationship, or missing scan evidence leaves the branch
 intact. Commands never use `--force` or `-D`.
 
+Attached-checkout commands also verify the checked-out branch and full HEAD
+before removal. This prevents a clean checkout whose branch or tip changed
+after the report from disappearing under stale approval.
+
 Detached-checkout commands are guarded too. They recheck the checkout's exact
 HEAD and then prove that the containing local branch/tag still reaches it, or
 that the exact live remote ref verified by the scan still exists. Before Git is
@@ -443,6 +475,17 @@ failed. Individual row sizes are inclusive, so a parent worktree includes any
 nested submodule or repository row beneath it. Totals count only non-overlapping
 measured paths and disclose excluded nested rows instead of counting the same
 disk usage twice.
+
+Add `--scope-strict` to a sized scan when only the exact requested roots need
+disk measurements. Groundskeeper still reads repository-wide Git metadata so
+outside linked worktrees and checked-out branches cannot become invisible, but
+it skips their expensive `du` walks. Live remote-default evidence is likewise
+deferred until a repository has an actual removal candidate.
+
+Squash detection remains read-only: its synthetic comparison commit is written
+to a temporary object directory and the repository object database is mounted
+only as an alternate. `--no-squash-detect` is therefore a speed/coverage trade,
+not a repository-write safety requirement.
 
 ## Operations
 

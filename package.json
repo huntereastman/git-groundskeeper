@@ -1,15 +1,25 @@
 {
   "name": "git-groundskeeper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Scan local Git forests for dirty worktrees, unpushed branches, stashes, and cleanup risks.",
   "type": "module",
   "bin": {
     "git-groundskeeper": "bin/git-groundskeeper.js"
   },
   "scripts": {
+    "prepack": "node scripts/stamp-provenance.js",
     "test": "node --test",
-    "scan": "node bin/git-groundskeeper.js scan"
+    "scan": "node bin/git-groundskeeper.js scan",
+    "dev": "node bin/git-groundskeeper.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "build-provenance.json"
+  ],
   "engines": {
     "node": ">=20"
   },

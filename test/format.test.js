@@ -487,8 +487,9 @@ test('branch removal rechecks an explicit base and refuses a moved branch OID', 
   const commands = text.split('\n').filter((line) => line.startsWith('git '));
 
   assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
-  // Paths with spaces must survive being pasted into a shell.
-  assert.ok(commands.every((line) => line.startsWith("git -C '/workspace/4 Pillars/app'")));
+  // Paths with spaces must survive being pasted into a shell. The command now
+  // starts by checking the linked checkout's branch, then removes via primary.
+  assert.ok(commands.every((line) => line.includes("git -C '/workspace/4 Pillars/app'")));
   // The configured upstream is deliberately not trusted as the deletion
   // guard. The command checks the named integration base, then update-ref binds
   // deletion to the full OID observed by the scan so a moved branch is refused.
@@ -503,11 +504,12 @@ test('branch removal rechecks an explicit base and refuses a moved branch OID', 
   // Nothing is proposed for the bucket that would lose work.
   assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app'")), false);
 
-  // A legacy/incomplete report cannot supply update-ref's expected-old guard.
-  // The checkout can still be removed, but branch retirement must be withheld.
+  // A legacy/incomplete report cannot supply either expected-old guard. The
+  // checkout now remains in place rather than relying on stale partial data.
   done.head = '987fedc';
   const incomplete = formatScanText(report, { commands: true, buckets: true, all: true });
-  assert.match(incomplete, /retained branch feature\/done: explicit base or scanned full branch OID unavailable/);
+  assert.match(incomplete, /retained checkout \/workspace\/done-worktree: exact branch or full HEAD guard unavailable/);
+  assert.doesNotMatch(incomplete, /worktree remove '\/workspace\/done-worktree'/);
   assert.doesNotMatch(incomplete, /update-ref -d 'refs\/heads\/feature\/done'/);
 });
 
@@ -564,8 +566,31 @@ test('generated branch retirement command refuses stale-upstream and moved-tip r
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   assert.notEqual(refusedByExpectedOld.status, 0);
-  assert.equal(fs.existsSync(movedFixture.linked), false, 'clean checkout removal should have completed');
+  assert.equal(
+    fs.existsSync(movedFixture.linked),
+    true,
+    'a moved clean checkout must remain untouched because its scan evidence is stale',
+  );
   assert.equal(gitCommand(movedFixture.repo, ['rev-parse', `refs/heads/${movedBranch}`]), movedHead);
+
+  const switchedFixture = createCommandFixture(t);
+  const scannedBranch = 'feature/scanned-branch';
+  gitCommand(switchedFixture.repo, ['worktree', 'add', '-b', scannedBranch, switchedFixture.linked, 'main']);
+  const unchangedHead = gitCommand(switchedFixture.linked, ['rev-parse', 'HEAD']);
+  const switchedReport = createGuardedBranchReport(switchedFixture, scannedBranch, unchangedHead);
+  gitCommand(switchedFixture.linked, ['switch', '-c', 'feature/switched-after-scan']);
+
+  const refusedByBranch = spawnSync(
+    '/bin/sh',
+    ['-c', extractBranchRetirementCommand(switchedReport, scannedBranch)],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  assert.notEqual(refusedByBranch.status, 0);
+  assert.equal(
+    fs.existsSync(switchedFixture.linked),
+    true,
+    'a clean branch switch must leave the checkout untouched',
+  );
 });
 
 test('detached cleanup commands recheck exact HEAD and current local retention', () => {

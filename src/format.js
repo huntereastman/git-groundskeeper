@@ -1010,6 +1010,26 @@ function branchDeleteCommand(repoPath, branch) {
   ].join(' && ');
 }
 
+// Bind checkout removal to the exact identity the scan reviewed. Git already
+// refuses ordinary dirty-state changes, while these two guards close the clean
+// branch-switch and moved-HEAD races that `git worktree remove` cannot see.
+function attachedWorktreeRemoveCommand(repoPath, worktree, branch) {
+  const expectedHead = isFullObjectId(worktree.headFull)
+    ? worktree.headFull
+    : branch?.name === worktree.branch && isFullObjectId(branch.head)
+      ? branch.head
+      : null;
+  if (!worktree.branch || !expectedHead) return null;
+
+  const branchCheck = [
+    `git -C ${shellQuote(worktree.path)} symbolic-ref --quiet --short HEAD`,
+    `grep -Fqx -- ${shellQuote(worktree.branch)}`,
+  ].join(' | ');
+  const headCheck = `test "$(git -C ${shellQuote(worktree.path)} rev-parse --verify HEAD)" = ${shellQuote(expectedHead)}`;
+  const remove = `git -C ${shellQuote(repoPath)} worktree remove ${shellQuote(worktree.path)}`;
+  return `${branchCheck} && ${headCheck} && ${remove}`;
+}
+
 // A detached checkout has no branch of its own, so its scan-time retention
 // evidence can disappear before a pasted command runs. Recheck both the exact
 // detached HEAD and the durable ref, then materialize the scanned commit as a
@@ -1079,7 +1099,9 @@ export function formatCleanupCommands(report, theme, only = null) {
     lines.push(theme.muted(`# ${bucket.label} (${inBucket.length})`));
 
     for (const { repo, worktree, branch } of inBucket) {
-      let removeWorktree = `git -C ${shellQuote(repo.primaryPath)} worktree remove ${shellQuote(worktree.path)}`;
+      let removeWorktree = worktree.detached
+        ? null
+        : attachedWorktreeRemoveCommand(repo.primaryPath, worktree, branch);
 
       if (worktree.detached) {
         removeWorktree = detachedWorktreeRemoveCommand(repo.primaryPath, worktree);
@@ -1088,6 +1110,9 @@ export function formatCleanupCommands(report, theme, only = null) {
           continue;
         }
         lines.push(theme.muted(`# creates safety branch ${detachedSafetyRef(worktree).slice('refs/heads/'.length)}`));
+      } else if (!removeWorktree) {
+        lines.push(theme.muted(`# retained checkout ${worktree.path}: exact branch or full HEAD guard unavailable`));
+        continue;
       }
 
       // Branch retirement is a separate capability of the zero-unmerged

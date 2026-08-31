@@ -1442,6 +1442,7 @@ test('scanRoots detects squash-merged branches that share no history with the ba
   git(fixture.repo, ['push', 'origin', 'main']);
   git(fixture.repo, ['push', 'origin', '--delete', 'feature/squashed']);
   git(linked, ['fetch', '--prune', 'origin']);
+  const objectStateBefore = git(fixture.repo, ['count-objects', '-v']);
 
   // Ancestry genuinely cannot see this, which is the whole problem.
   assert.throws(() => git(linked, ['merge-base', '--is-ancestor', 'feature/squashed', 'origin/main']));
@@ -1460,6 +1461,11 @@ test('scanRoots detects squash-merged branches that share no history with the ba
   // ancestry, which is exactly what a squash destroys. This is what tells the
   // reader they will need -D here and nowhere else.
   assert.equal(worktree.ancestryVisible, false);
+  assert.equal(
+    git(fixture.repo, ['count-objects', '-v']),
+    objectStateBefore,
+    'squash detection must not add a dangling object to the repository',
+  );
 });
 
 test('a merged branch with no worktree is still found, which is what a prune leaves behind', async () => {
@@ -1492,7 +1498,7 @@ test('a merged branch with no worktree is still found, which is what a prune lea
   assert.equal(branch.ancestryVisible, false);
 });
 
-test('squash detection can be disabled to keep the scan strictly read-only', async () => {
+test('squash detection can be disabled when its extra content comparison is not wanted', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'squashed-optout');
 
@@ -1561,6 +1567,42 @@ test('size scans measure primary, dirty, and clean worktrees independently of cl
   assert.equal(Number.isInteger(primary.bytes), true);
   assert.equal(Number.isInteger(dirtyWorktree.bytes), true);
   assert.equal(Number.isInteger(cleanWorktree.bytes), true);
+});
+
+test('scope-strict size scans measure only exact requested roots', async () => {
+  const fixture = createFixture();
+  const selected = path.join(fixture.parent, 'selected-sized');
+  const outside = path.join(fixture.parent, 'outside-unsized');
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/selected-sized', selected, 'main']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/outside-unsized', outside, 'main']);
+
+  const report = await scanRoots([selected], {
+    maxDepth: 1,
+    sizes: true,
+    scopeStrict: true,
+  });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+
+  assert.equal(Number.isInteger(repo.worktrees.find((worktree) => worktree.path === selected).bytes), true);
+  assert.equal(repo.worktrees.find((worktree) => worktree.path === outside).bytes, null);
+  assert.equal(repo.worktrees.find((worktree) => worktree.path === fixture.repo).bytes, null);
+});
+
+test('bucket scans defer remote default evidence until a removal candidate exists', async () => {
+  const fixture = createFixture();
+  let calls = 0;
+
+  const report = await scanRoots([fixture.repo], {
+    maxDepth: 1,
+    buckets: true,
+    inspectPrimaryBranch: async () => {
+      calls += 1;
+      return { branch: 'main', head: git(fixture.repo, ['rev-parse', 'HEAD']) };
+    },
+  });
+
+  assert.equal(calls, 0);
+  assert.equal(report.repos[0].defaultBranchStatus, 'not-requested');
 });
 
 test('discoverWorktrees prunes home-level noise but keeps real project roots', async () => {

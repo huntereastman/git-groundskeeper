@@ -9,6 +9,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 
 const binPath = path.resolve('bin/git-groundskeeper.js');
 
+test('--version reports package, commit, state, and source provenance', () => {
+  const result = runCli(['--version']);
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^git-groundskeeper 0\.2\.0 \([0-9a-f]{12}, (?:clean|dirty), development-checkout\)\n$/);
+  assert.equal(result.stderr, '');
+});
+
 test('scan exits 0 when attention is found by default', (t) => {
   const repo = createDirtyRepo(t);
   const result = runCli(['scan', repo]);
@@ -47,7 +55,10 @@ test('progress on stderr keeps forced JSON output machine-readable', (t) => {
   const result = runCli(['scan', repo, '--json', '--progress', '--color=always']);
 
   assert.equal(result.status, 0);
-  assert.doesNotThrow(() => JSON.parse(result.stdout));
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.provenance.name, 'git-groundskeeper');
+  assert.equal(report.provenance.version, '0.2.0');
+  assert.match(report.provenance.commit, /^[0-9a-f]{40,64}$/);
   assert.match(result.stderr, /Scanning worktrees/);
   assert.doesNotMatch(result.stderr, /\u001b\[/);
 });
