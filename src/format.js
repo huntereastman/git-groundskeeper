@@ -22,6 +22,8 @@ export function formatScanText(report, options = {}) {
   lines.push('Git Groundskeeper');
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push(`Roots: ${report.roots.join(', ')}`);
+  const scopeWarning = formatFilesystemRootWarning(report);
+  if (scopeWarning) lines.push(scopeWarning);
   lines.push(
     `Repos: ${summary.repoCount}, worktrees: ${summary.worktreeCount}, dirty worktrees: ${summary.dirtyWorktreeCount}, draft WIP: ${summary.draftWorktreeCount ?? 0}, aliased worktrees: ${summary.aliasedWorktreeCount ?? 0}, branches ahead: ${summary.branchAheadCount}, no upstream: ${summary.noUpstreamBranchCount}, upstream gone: ${summary.goneUpstreamBranchCount}, stashes: ${summary.stashCount}`,
   );
@@ -119,6 +121,8 @@ export function formatCompactScanText(report, options = {}) {
   lines.push('Git Groundskeeper Compact');
   lines.push(theme.muted(`Generated: ${report.generatedAt}`));
   lines.push(theme.muted(`Roots: ${report.roots.join(', ')}`));
+  const scopeWarning = formatFilesystemRootWarning(report);
+  if (scopeWarning) lines.push(theme.caution(scopeWarning));
   lines.push(
     [
       `In scope: ${theme.bold(scopedWorktrees.length)} ${plural(scopedWorktrees.length, 'worktree')}`,
@@ -1848,6 +1852,10 @@ function shortenPath(candidatePath, roots) {
   for (const root of roots) {
     const normalizedRoot = normalizeComparablePath(root);
     if (isPathInside(normalizedRoot, normalizedCandidate)) {
+      // A path relative to `/` loses the leading slash and looks like a
+      // repository-relative path. Whole-filesystem scans must keep absolute
+      // paths so copied commands and visual comparisons are unambiguous.
+      if (normalizedRoot === path.parse(normalizedRoot).root) return normalizedCandidate;
       return path.relative(normalizedRoot, normalizedCandidate) || '.';
     }
 
@@ -1864,6 +1872,17 @@ function shortenPath(candidatePath, roots) {
   }
 
   return normalizedCandidate;
+}
+
+function formatFilesystemRootWarning(report) {
+  const scansFilesystemRoot = report.roots.some((root) => {
+    const normalizedRoot = normalizeComparablePath(root);
+    return normalizedRoot === path.parse(normalizedRoot).root;
+  });
+  if (!scansFilesystemRoot) return null;
+
+  const maxDepth = Number.isInteger(report.maxDepth) ? report.maxDepth : 8;
+  return `Scope warning: a filesystem-root scan includes system/tool-managed repositories and descends at most ${maxDepth} directories from each root. Prefer explicit workspace roots before acting on cleanup results.`;
 }
 
 function isInsideAnyRoot(candidatePath, roots) {
