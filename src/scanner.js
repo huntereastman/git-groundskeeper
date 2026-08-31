@@ -38,6 +38,7 @@ const SKIP_DIRS = new Set([
   'Movies',
   'Music',
   'Pictures',
+  'SourcePackages',
   '.Trash',
   '.bun',
   '.cache',
@@ -113,6 +114,7 @@ export async function scanRoots(roots, options = {}) {
   // same directory for an out-of-root worktree.
   const normalizedRoots = roots.map(canonicalPath);
   const concurrency = resolveConcurrency(options);
+  const directoryIdentity = options.directoryIdentity ?? filesystemIdentity;
 
   // Phase 1: filesystem discovery. The walk yields cooperatively so progress,
   // signals, and other event-loop work stay responsive across large forests.
@@ -148,16 +150,17 @@ export async function scanRoots(roots, options = {}) {
 
   for (const { worktreePath, commonDir } of identified) {
     if (!commonDir) continue;
+    const commonDirIdentity = resolveDirectoryIdentity(commonDir, directoryIdentity);
 
-    if (!reposByCommonDir.has(commonDir)) {
-      reposByCommonDir.set(commonDir, {
+    if (!reposByCommonDir.has(commonDirIdentity)) {
+      reposByCommonDir.set(commonDirIdentity, {
         commonDir,
         discoveryRoots: [],
         worktreePaths: new Set(),
       });
     }
 
-    const repo = reposByCommonDir.get(commonDir);
+    const repo = reposByCommonDir.get(commonDirIdentity);
     repo.discoveryRoots.push(worktreePath);
 
     repo.worktreePaths.add(worktreePath);
@@ -174,10 +177,18 @@ export async function scanRoots(roots, options = {}) {
   );
 
   for (const [index, repo] of repoRecords.entries()) {
-    repo.worktreePathsInGitOrder = [...linkedPathsByRepo[index]];
-    for (const linkedWorktree of linkedPathsByRepo[index]) {
-      repo.worktreePaths.add(linkedWorktree);
-    }
+    // Git's registry is authoritative when the same checkout is reachable by
+    // two filesystem spellings. In particular, APFS firmlinks expose
+    // /Users/... again below /System/Volumes/Data/Users/.... Keeping both
+    // strings would turn the alias into a non-primary cleanup candidate.
+    repo.worktreePathsInGitOrder = uniquePathsByIdentity(
+      linkedPathsByRepo[index],
+      directoryIdentity,
+    );
+    repo.worktreePaths = new Set(uniquePathsByIdentity(
+      [...repo.worktreePathsInGitOrder, ...repo.worktreePaths],
+      directoryIdentity,
+    ));
   }
 
   for (const repo of repoRecords) {
@@ -275,6 +286,7 @@ export async function scanRoots(roots, options = {}) {
     schemaVersion: 1,
     generatedAt: startedAt,
     roots: normalizedRoots,
+    maxDepth: options.maxDepth ?? 8,
     summary: buildSummary(repos),
     repos,
   };
@@ -302,6 +314,8 @@ export function discoverWorktrees(roots, options = {}) {
   const maxDepth = options.maxDepth ?? 8;
   const found = new Set();
   const seenDirs = new Set();
+  const directoryIdentity = options.directoryIdentity ?? filesystemIdentity;
+  const preferredPaths = preferredScanRootChildren(roots, directoryIdentity);
 
   for (const root of roots) {
     walk(root, 0);
@@ -311,8 +325,12 @@ export function discoverWorktrees(roots, options = {}) {
 
   function walk(dir, depth) {
     const resolved = safeRealpath(dir);
-    if (!resolved || seenDirs.has(resolved) || depth > maxDepth) return;
-    seenDirs.add(resolved);
+    if (!resolved || depth > maxDepth) return;
+    const identity = resolveDirectoryIdentity(resolved, directoryIdentity);
+    const preferredPath = preferredPaths.get(identity);
+    if (preferredPath && preferredPath !== resolved) return;
+    if (seenDirs.has(identity)) return;
+    seenDirs.add(identity);
 
     const basename = path.basename(resolved);
     if (depth > 0 && shouldSkipDirectory(basename)) return;
@@ -346,6 +364,8 @@ export async function discoverWorktreesAsync(roots, options = {}) {
   const yieldDiscovery = options.discoveryYield ?? yieldToEventLoop;
   const found = new Set();
   const seenDirs = new Set();
+  const directoryIdentity = options.directoryIdentity ?? filesystemIdentity;
+  const preferredPaths = preferredScanRootChildren(roots, directoryIdentity);
   const pending = roots.map((root) => ({ dir: root, depth: 0 })).reverse();
   let visitedDirectories = 0;
   let processedCandidates = 0;
@@ -356,8 +376,12 @@ export async function discoverWorktreesAsync(roots, options = {}) {
 
     if (depth <= maxDepth) {
       const resolved = safeRealpath(dir);
-      if (resolved && !seenDirs.has(resolved)) {
-        seenDirs.add(resolved);
+      const identity = resolved
+        ? resolveDirectoryIdentity(resolved, directoryIdentity)
+        : null;
+      const preferredPath = identity ? preferredPaths.get(identity) : null;
+      if (resolved && (!preferredPath || preferredPath === resolved) && !seenDirs.has(identity)) {
+        seenDirs.add(identity);
 
         const basename = path.basename(resolved);
         if (depth === 0 || !shouldSkipDirectory(basename)) {
@@ -2637,6 +2661,60 @@ function safeRealpath(dir) {
   } catch {
     return null;
   }
+}
+
+function filesystemIdentity(candidatePath) {
+  try {
+    const stats = fs.statSync(candidatePath, { bigint: true });
+    if (stats.ino !== 0n) return `fs:${stats.dev}:${stats.ino}`;
+  } catch {
+    // Missing and unreadable paths still need a stable fallback identity.
+  }
+  return `path:${canonicalPath(candidatePath)}`;
+}
+
+function resolveDirectoryIdentity(candidatePath, identityResolver) {
+  try {
+    return identityResolver(candidatePath) ?? `path:${canonicalPath(candidatePath)}`;
+  } catch {
+    return `path:${canonicalPath(candidatePath)}`;
+  }
+}
+
+function preferredScanRootChildren(roots, identityResolver) {
+  const preferred = new Map();
+
+  for (const root of roots) {
+    const resolvedRoot = safeRealpath(root);
+    if (!resolvedRoot) continue;
+
+    let entries;
+    try {
+      entries = fs.readdirSync(resolvedRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const candidate = safeRealpath(path.join(resolvedRoot, entry.name));
+      if (!candidate) continue;
+      const identity = resolveDirectoryIdentity(candidate, identityResolver);
+      if (!preferred.has(identity)) preferred.set(identity, candidate);
+    }
+  }
+
+  return preferred;
+}
+
+function uniquePathsByIdentity(paths, identityResolver) {
+  const unique = new Map();
+  for (const candidatePath of paths) {
+    const canonical = canonicalPath(candidatePath);
+    const identity = resolveDirectoryIdentity(canonical, identityResolver);
+    if (!unique.has(identity)) unique.set(identity, canonical);
+  }
+  return [...unique.values()];
 }
 
 function canonicalPath(candidatePath) {
