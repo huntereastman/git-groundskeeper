@@ -1882,7 +1882,7 @@ function formatFilesystemRootWarning(report) {
   if (!scansFilesystemRoot) return null;
 
   const maxDepth = Number.isInteger(report.maxDepth) ? report.maxDepth : 8;
-  return `Scope warning: a filesystem-root scan includes system/tool-managed repositories and descends at most ${maxDepth} directories from each root. Prefer explicit workspace roots before acting on cleanup results.`;
+  return `Scope warning: a filesystem-root scan includes system/tool-managed repositories and descends at most ${maxDepth} ${plural(maxDepth, 'directory', 'directories')} from each root. Prefer explicit workspace roots before acting on cleanup results.`;
 }
 
 function isInsideAnyRoot(candidatePath, roots) {

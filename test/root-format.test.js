@@ -16,6 +16,11 @@ test('filesystem-root reports retain absolute paths and disclose scan scope', ()
   assert.match(output, /descends at most 8 directories/);
   assert.match(output, /\| \/Users\/hunter\/Development\/project\s+\|/);
   assert.doesNotMatch(output, /\| Users\/hunter\/Development\/project\s+\|/);
+
+  report.maxDepth = 1;
+  const singularDepth = formatScanText(report, { all: true, color: 'never', tableWidth: 180 });
+  assert.match(singularDepth, /descends at most 1 directory from each root/);
+  assert.doesNotMatch(singularDepth, /1 directories/);
 });
 
 test('workspace-root reports stay relative and do not show the filesystem warning', () => {
