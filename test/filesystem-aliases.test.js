@@ -95,6 +95,27 @@ test('discovery prunes SourcePackages under custom-named build roots', async (t)
   }
 });
 
+test('discovery prunes Gemini history snapshots without hiding other Gemini repositories', async (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'groundskeeper-gemini-history-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const history = path.join(root, '.gemini', 'history', 'snapshot');
+  const project = path.join(root, '.gemini', 'projects', 'active');
+  createRepository(history);
+  createRepository(project);
+
+  const synchronous = discoverWorktrees([root], { maxDepth: 6 });
+  const cooperative = await discoverWorktreesAsync([root], {
+    maxDepth: 6,
+    discoveryYieldEvery: 1,
+  });
+
+  for (const found of [synchronous, cooperative]) {
+    assert.equal(found.includes(history), false);
+    assert.equal(found.includes(project), true);
+  }
+});
+
 function createRepository(repository, options = {}) {
   fs.mkdirSync(repository, { recursive: true });
   execFileSync('git', ['init', '-q', '-b', 'main', repository]);

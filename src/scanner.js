@@ -62,10 +62,14 @@ const SKIP_DIRS = new Set([
 // Git repositories, but they are dependency caches rather than user
 // worktrees. Exact-name pruning alone lets them leak into scans and can make a
 // broken cache abort an otherwise healthy forest walk.
-function shouldSkipDirectory(name) {
+function shouldSkipDirectory(name, parentPath = null) {
   return SKIP_DIRS.has(name)
     || name === '.build'
-    || /^\.?deriveddata(?:$|[-_.])/i.test(name);
+    || /^\.?deriveddata(?:$|[-_.])/i.test(name)
+    // Gemini stores internal snapshot repositories here. They are tool
+    // history, not checkouts a user should push, prune, or size as project
+    // work. Keep other hidden Gemini directories discoverable by default.
+    || (name === 'history' && path.basename(parentPath ?? '') === '.gemini');
 }
 
 // Agent tools check out real linked worktrees under hidden home directories,
@@ -333,7 +337,7 @@ export function discoverWorktrees(roots, options = {}) {
     seenDirs.add(identity);
 
     const basename = path.basename(resolved);
-    if (depth > 0 && shouldSkipDirectory(basename)) return;
+    if (depth > 0 && shouldSkipDirectory(basename, path.dirname(resolved))) return;
 
     if (hasGitMetadata(resolved)) {
       found.add(resolved);
@@ -348,7 +352,7 @@ export function discoverWorktrees(roots, options = {}) {
 
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (shouldSkipDirectory(entry.name)) continue;
+      if (shouldSkipDirectory(entry.name, resolved)) continue;
       walk(path.join(resolved, entry.name), depth + 1);
     }
   }
@@ -384,7 +388,7 @@ export async function discoverWorktreesAsync(roots, options = {}) {
         seenDirs.add(identity);
 
         const basename = path.basename(resolved);
-        if (depth === 0 || !shouldSkipDirectory(basename)) {
+        if (depth === 0 || !shouldSkipDirectory(basename, path.dirname(resolved))) {
           visitedDirectories += 1;
 
           if (hasGitMetadata(resolved)) {
@@ -400,7 +404,7 @@ export async function discoverWorktreesAsync(roots, options = {}) {
 
           for (let index = entries.length - 1; index >= 0; index -= 1) {
             const entry = entries[index];
-            if (!entry.isDirectory() || shouldSkipDirectory(entry.name)) continue;
+            if (!entry.isDirectory() || shouldSkipDirectory(entry.name, resolved)) continue;
             pending.push({ dir: path.join(resolved, entry.name), depth: depth + 1 });
           }
         }
