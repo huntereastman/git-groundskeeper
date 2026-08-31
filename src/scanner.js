@@ -11,6 +11,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const LIVE_REMOTE_TIMEOUT_MS = 10_000;
+const DEFAULT_REMOTE = 'origin';
 const REPOSITORY_POLICY_FILE = 'groundskeeper-policy.json';
 const REPOSITORY_POLICY_SCHEMA_VERSION = 1;
 const MAX_REPOSITORY_POLICY_BYTES = 256 * 1024;
@@ -513,11 +514,28 @@ async function finishRepo(repo, worktrees, options) {
     await annotateRemovalCandidateHistory(primaryPath, worktrees, branchMap);
   }
 
+  // The configured integration base can intentionally be dev while the
+  // repository's default branch is master. Keep those separate: cleanup still
+  // uses the integration base, while the report names whether the exact tip is
+  // also contained in the remote default branch.
+  const primaryBranch = options.buckets
+    ? await inspectPrimaryBranch(primaryPath, options)
+    : emptyPrimaryBranchEvidence();
+  if (options.buckets) {
+    await annotatePrimaryBranchContainment(primaryPath, worktrees, branchMap, primaryBranch);
+  }
+
   const stashes = await listStashes(primaryPath);
 
   return {
     primaryPath,
     commonDir: repo.commonDir,
+    repository: primaryBranch.repository,
+    defaultBranch: primaryBranch.branch,
+    defaultBranchRef: primaryBranch.ref,
+    defaultBranchHead: primaryBranch.head,
+    defaultBranchStatus: primaryBranch.status,
+    defaultBranchCheckedAt: primaryBranch.checkedAt,
     ignoredContentPolicy: {
       source: repo.ignoredContentPolicy.source,
       ruleCount: repo.ignoredContentPolicy.rules.length,
@@ -600,11 +618,14 @@ async function annotateRemovalCandidateHistory(cwd, worktrees, branchMap) {
     candidates.map((worktree) => worktree.mergedInto ?? baseRef).filter(Boolean),
   );
   const branchCountsByBase = new Map();
+  const baseHeads = new Map();
   for (const candidateBase of bases) {
-    branchCountsByBase.set(
-      candidateBase,
-      await listCommitsNotInBaseByBranch(cwd, candidateBase),
-    );
+    const [counts, head] = await Promise.all([
+      listCommitsNotInBaseByBranch(cwd, candidateBase),
+      resolveRefHead(cwd, candidateBase),
+    ]);
+    branchCountsByBase.set(candidateBase, counts);
+    baseHeads.set(candidateBase, head);
   }
 
   for (const worktree of candidates) {
@@ -615,6 +636,7 @@ async function annotateRemovalCandidateHistory(cwd, worktrees, branchMap) {
       ? worktree.headFull
       : worktree.branch ?? worktree.containedIn;
     worktree.unmergedBase = worktree.mergedInto ?? baseRef;
+    worktree.unmergedBaseHead = baseHeads.get(worktree.unmergedBase) ?? null;
     const branchCounts = branchCountsByBase.get(worktree.unmergedBase) ?? null;
 
     // Merge evidence decides whether retirement is safe; it must not rewrite
@@ -630,8 +652,14 @@ async function annotateRemovalCandidateHistory(cwd, worktrees, branchMap) {
     const branch = branchMap.get(worktree.branch);
     if (!branch) continue;
     branch.unmergedBase = worktree.unmergedBase;
+    branch.unmergedBaseHead = worktree.unmergedBaseHead;
     branch.unmergedCommits = worktree.unmergedCommits;
   }
+}
+
+async function resolveRefHead(cwd, ref) {
+  const result = await git(cwd, ['rev-parse', '--verify', '--quiet', ref]);
+  return result.ok ? result.stdout.trim() : null;
 }
 
 async function listCommitsNotInBaseByBranch(cwd, baseRef) {
@@ -654,6 +682,146 @@ async function listCommitsNotInBaseByBranch(cwd, baseRef) {
   }
 
   return counts;
+}
+
+function emptyPrimaryBranchEvidence() {
+  return {
+    repository: null,
+    remote: DEFAULT_REMOTE,
+    branch: null,
+    ref: null,
+    head: null,
+    status: 'not-requested',
+    checkedAt: null,
+  };
+}
+
+async function inspectPrimaryBranch(cwd, options) {
+  const getRepository = options.getRepositoryIdentity ?? getRepositoryIdentity;
+  const evidence = {
+    ...emptyPrimaryBranchEvidence(),
+    repository: await getRepository(cwd),
+  };
+
+  if (options.liveRemoteCheck === false) {
+    return { ...evidence, status: 'skipped' };
+  }
+
+  const inspect = options.inspectPrimaryBranch ?? inspectLivePrimaryBranch;
+  try {
+    const primary = await inspect(cwd, DEFAULT_REMOTE);
+    if (!primary?.branch || !primary.head) {
+      return { ...evidence, status: 'unavailable' };
+    }
+
+    return {
+      ...evidence,
+      branch: primary.branch,
+      ref: `${DEFAULT_REMOTE}/${primary.branch}`,
+      head: primary.head,
+      status: 'checked',
+      checkedAt: new Date().toISOString(),
+    };
+  } catch {
+    return { ...evidence, status: 'unavailable' };
+  }
+}
+
+async function getRepositoryIdentity(cwd) {
+  const result = await git(cwd, ['config', '--get', `remote.${DEFAULT_REMOTE}.url`]);
+  if (!result.ok) return null;
+  return parseRemoteRepository(result.stdout.trim());
+}
+
+async function inspectLivePrimaryBranch(cwd, remote) {
+  // --symref reads the remote's HEAD without fetching or changing any local
+  // reference. The ordinary SHA line is the exact remote tip we must match
+  // before relying on a locally cached origin/<default> for containment.
+  const result = await git(cwd, ['ls-remote', '--symref', remote, 'HEAD'], {
+    timeoutMs: LIVE_REMOTE_TIMEOUT_MS,
+  });
+  if (!result.ok) return null;
+
+  let branch = null;
+  let head = null;
+  for (const line of result.stdout.split('\n').filter(Boolean)) {
+    const [value, ref] = line.split('\t', 2);
+    const prefix = 'ref: refs/heads/';
+    if (ref === 'HEAD' && value?.startsWith(prefix)) {
+      branch = value.slice(prefix.length);
+    } else if (ref === 'HEAD' && /^[0-9a-f]{40}$/i.test(value ?? '')) {
+      head = value;
+    }
+  }
+
+  return branch && head ? { branch, head } : null;
+}
+
+async function annotatePrimaryBranchContainment(cwd, worktrees, branchMap, primaryBranch) {
+  const state = primaryBranch.status === 'checked'
+    ? await resolvePrimaryBranchComparison(cwd, primaryBranch)
+    : { comparable: false, localHead: null };
+  const containedBranches = state.comparable
+    ? await listBranchesMergedIntoBase(cwd, primaryBranch.ref)
+    : null;
+
+  for (const branch of branchMap.values()) {
+    branch.defaultBranch = primaryBranch.branch;
+    branch.defaultBranchRef = primaryBranch.ref;
+    branch.defaultBranchHead = primaryBranch.head;
+    branch.defaultBranchStatus = primaryBranch.status;
+    branch.defaultBranchCheckedAt = primaryBranch.checkedAt;
+    branch.defaultBranchContainment = containedBranches instanceof Set
+      ? containedBranches.has(branch.name)
+        ? 'contained'
+        : 'not-contained'
+      : 'unknown';
+  }
+
+  for (const worktree of worktrees) {
+    const branch = worktree.branch ? branchMap.get(worktree.branch) : null;
+    worktree.defaultBranch = primaryBranch.branch;
+    worktree.defaultBranchRef = primaryBranch.ref;
+    worktree.defaultBranchHead = primaryBranch.head;
+    worktree.defaultBranchStatus = primaryBranch.status;
+    worktree.defaultBranchCheckedAt = primaryBranch.checkedAt;
+
+    if (branch) {
+      worktree.defaultBranchContainment = branch.defaultBranchContainment;
+      continue;
+    }
+
+    if (!state.comparable || !worktree.headFull) {
+      worktree.defaultBranchContainment = 'unknown';
+      continue;
+    }
+
+    worktree.defaultBranchContainment = await isAncestor(cwd, worktree.headFull, primaryBranch.ref)
+      ? 'contained'
+      : 'not-contained';
+  }
+}
+
+async function resolvePrimaryBranchComparison(cwd, primaryBranch) {
+  const local = await git(cwd, ['rev-parse', '--verify', '--quiet', primaryBranch.ref]);
+  const localHead = local.ok ? local.stdout.trim() : null;
+
+  return {
+    localHead,
+    comparable: Boolean(localHead && localHead === primaryBranch.head),
+  };
+}
+
+async function listBranchesMergedIntoBase(cwd, baseRef) {
+  const result = await git(cwd, [
+    'for-each-ref',
+    `--merged=${baseRef}`,
+    '--format=%(refname:short)',
+    'refs/heads',
+  ]);
+  if (!result.ok) return null;
+
+  return new Set(result.stdout.trim().split('\n').filter(Boolean));
 }
 
 function selectIntegrationBaseRef(branchMap) {
@@ -1375,6 +1543,16 @@ async function listRemoteOwners(cwd) {
 // Handles scp-style (git@host:owner/repo.git), ssh:// and https:// URLs.
 // Returns null for local path remotes, which have no owner to speak of.
 export function parseRemoteOwner(url) {
+  const segments = parseRemotePathSegments(url);
+  return segments?.length >= 2 ? segments[segments.length - 2] : null;
+}
+
+export function parseRemoteRepository(url) {
+  const segments = parseRemotePathSegments(url);
+  return segments?.length >= 2 ? `${segments[segments.length - 2]}/${segments[segments.length - 1]}` : null;
+}
+
+function parseRemotePathSegments(url) {
   const scpStyle = /^[^/@]+@([^:/]+):(.+)$/.exec(url);
   let repoPath;
 
@@ -1388,12 +1566,10 @@ export function parseRemoteOwner(url) {
     }
   }
 
-  const segments = repoPath
+  return repoPath
     .replace(/\.git$/, '')
     .split('/')
     .filter(Boolean);
-
-  return segments.length >= 2 ? segments[segments.length - 2] : null;
 }
 
 // Files git is told to ignore are invisible to `git status`, so a worktree can

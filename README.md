@@ -420,6 +420,18 @@ branches remain outside automatic deletion buckets. `?`
 means there is no comparable upstream or base. `Age` is the HEAD commit age and
 is context only, not proof that a worktree is inactive.
 
+Bucket output also includes **Repository integration evidence**. It names the
+canonical `owner/repository`, the integration base actually used for `Unmerged`,
+the remote default branch and live default-branch SHA, and an ancestry summary
+for the displayed worktrees. This keeps `origin/dev` as valid integration
+evidence without implying that the same commits are already contained in a
+repository whose primary branch is `master`. The JSON report carries the exact
+worktree tip (`head`), integration-base SHA (`unmergedBaseHead`), default branch
+and SHA (`defaultBranch`, `defaultBranchHead`), live upstream state, and
+`defaultBranchContainment` for row-level review. A primary containment result is
+only reported when the local `origin/<default>` tip exactly matches the live
+remote default SHA; otherwise it stays unknown rather than trusting stale refs.
+
 `--sizes` runs `du` for every discovered worktree, including primary, dirty,
 locked, in-progress, submodule-bearing, aliased, and otherwise blocked rows.
 This makes the flag independent of cleanup classification and can make a broad

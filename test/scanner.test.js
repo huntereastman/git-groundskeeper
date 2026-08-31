@@ -10,6 +10,7 @@ import {
   discoverWorktrees,
   discoverWorktreesAsync,
   parseRemoteOwner,
+  parseRemoteRepository,
   scanRoots,
 } from '../src/scanner.js';
 import { formatScanText } from '../src/format.js';
@@ -962,6 +963,32 @@ test('bucket scans preserve the exact upstream branch name when it differs local
   assert.equal(worktree.unmergedCommits, 0);
 });
 
+test('bucket scans distinguish the integration base from the remote default branch', async () => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'integrated-into-dev');
+
+  git(fixture.repo, ['checkout', '-b', 'dev', 'main']);
+  fs.writeFileSync(path.join(fixture.repo, 'dev.txt'), 'dev-only\n');
+  git(fixture.repo, ['add', 'dev.txt']);
+  git(fixture.repo, ['commit', '-m', 'dev-only work']);
+  git(fixture.repo, ['push', '-u', 'origin', 'dev']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/integrated-into-dev', linked, 'dev']);
+  git(linked, ['branch', '--set-upstream-to=origin/dev', 'feature/integrated-into-dev']);
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4, buckets: true });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+
+  assert.equal(repo.defaultBranch, 'main');
+  assert.equal(repo.defaultBranchRef, 'origin/main');
+  assert.match(repo.defaultBranchHead, /^[0-9a-f]{40}$/);
+  assert.equal(worktree.unmergedBase, 'origin/dev');
+  assert.match(worktree.unmergedBaseHead, /^[0-9a-f]{40}$/);
+  assert.equal(worktree.unmergedCommits, 0);
+  assert.equal(worktree.defaultBranchContainment, 'not-contained');
+  assert.equal(repo.repository, null);
+});
+
 test('bucket scans attach live GitHub merge evidence to an integrated branch', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'merged-live');
@@ -1658,6 +1685,13 @@ test('parseRemoteOwner handles every remote URL shape', async () => {
   // Local path remotes have no owner, and must not be mistaken for one.
   assert.equal(parseRemoteOwner('/tmp/fixtures/remote.git'), null);
   assert.equal(parseRemoteOwner('../sibling/remote.git'), null);
+});
+
+test('parseRemoteRepository preserves the owner/repository identity', () => {
+  assert.equal(parseRemoteRepository('git@github.com:huntereastman/git-groundskeeper.git'), 'huntereastman/git-groundskeeper');
+  assert.equal(parseRemoteRepository('https://github.com/numbus-llc/numbus.git'), 'numbus-llc/numbus');
+  assert.equal(parseRemoteRepository('ssh://git@gitlab.com/group/thing.git'), 'group/thing');
+  assert.equal(parseRemoteRepository('/tmp/fixtures/remote.git'), null);
 });
 
 test('classifyOwnership separates my repos from everything else on the disk', async () => {

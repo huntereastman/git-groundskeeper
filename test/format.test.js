@@ -98,6 +98,34 @@ test('fetch staleness measures only the repos actually claiming merged', () => {
   assert.match(staleText, /Candidate branch existence was checked live/);
 });
 
+test('bucket output separates default-branch containment from integration base', () => {
+  const report = createReport();
+  const [repo] = report.repos;
+  const candidate = repo.worktrees[2];
+  const branch = repo.branches.find((entry) => entry.name === candidate.branch);
+
+  repo.repository = 'numbus-llc/numbus-flutter';
+  repo.defaultBranch = 'master';
+  repo.defaultBranchHead = '0123456789abcdef0123456789abcdef01234567';
+  repo.defaultBranchStatus = 'checked';
+  candidate.unmergedBase = 'origin/dev';
+  candidate.unmergedBaseHead = 'abcdef0123456789abcdef0123456789abcdef0123';
+  candidate.defaultBranchContainment = 'not-contained';
+  branch.unmergedBase = candidate.unmergedBase;
+  branch.unmergedBaseHead = candidate.unmergedBaseHead;
+  branch.defaultBranchContainment = candidate.defaultBranchContainment;
+
+  const text = formatScanText(report, { buckets: true, all: true, color: 'never', tableWidth: 180 });
+
+  assert.match(text, /Repository integration evidence/);
+  assert.match(text, /numbus-llc\/numbus-flutter/);
+  assert.match(text, /origin\/dev/);
+  assert.match(text, /abcdef012345/);
+  assert.match(text, /master/);
+  assert.match(text, /0123456789ab/);
+  assert.match(text, /yes 0, no 1, \? 0/);
+});
+
 test('a wide terminal is spent on the columns that are still clipping', () => {
   const report = createReport();
   const long = '/workspace/Development/numbus/B2C/numbus-worktrees/a-very-long-worktree-name-here';

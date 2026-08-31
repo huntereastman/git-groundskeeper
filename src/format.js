@@ -519,6 +519,10 @@ export function formatTierBuckets(report, theme, tableWidth, options = {}) {
     theme.muted('? = no comparable upstream/base. Age = HEAD commit age, not proof of inactivity.'),
     '',
   ];
+  const repositoryEvidence = formatRepositoryIntegrationEvidence(items, report.roots, theme, tableWidth);
+  if (repositoryEvidence.length > 0) {
+    lines.push(...repositoryEvidence, '');
+  }
   const reclaimableItems = items.filter(({ worktree }) =>
     TIER_BUCKETS.some((bucket) => bucket.reclaimable && matchesTierBucket(bucket, worktree)),
   );
@@ -609,6 +613,91 @@ export function formatTierBuckets(report, theme, tableWidth, options = {}) {
   lines.push('');
 
   return lines;
+}
+
+function formatRepositoryIntegrationEvidence(items, roots, theme, tableWidth) {
+  const byRepo = new Map();
+  for (const item of items) {
+    if (!byRepo.has(item.repo)) byRepo.set(item.repo, []);
+    byRepo.get(item.repo).push(item);
+  }
+
+  const rows = [...byRepo.entries()].map(([repo, repoItems]) => {
+    const bases = [...new Set(repoItems
+      .map(({ worktree, branch }) => branch?.unmergedBase ?? worktree.unmergedBase)
+      .filter(Boolean))];
+    const baseHeads = [...new Set(repoItems
+      .map(({ worktree, branch }) => branch?.unmergedBaseHead ?? worktree.unmergedBaseHead)
+      .filter(Boolean))];
+    const containment = summarizePrimaryContainment(repoItems);
+    const liveUpstream = summarizeLiveUpstreams(repoItems);
+    const primary = repo.defaultBranch
+      ? repo.defaultBranchStatus === 'checked'
+        ? repo.defaultBranch
+        : `${repo.defaultBranch} (${repo.defaultBranchStatus})`
+      : repo.defaultBranchStatus === 'unavailable'
+        ? 'unavailable'
+        : '-';
+
+    return {
+      repo: repo.repository ?? shortenPath(repo.primaryPath, roots),
+      integration: bases.length > 0 ? bases.join(', ') : '-',
+      integrationHead: baseHeads.length > 0 ? baseHeads.map(shortObjectId).join(', ') : '-',
+      primary,
+      primaryHead: shortObjectId(repo.defaultBranchHead),
+      containment: colorPrimaryContainment(containment, theme),
+      live: liveUpstream,
+    };
+  });
+
+  if (rows.length === 0) return [];
+
+  return [
+    theme.bold('Repository integration evidence'),
+    theme.muted('Primary is the remote default branch. Containment is Git ancestry against its current SHA; ? means the local default ref was not current enough to prove it.'),
+    ...renderTable([
+      { key: 'repo', header: 'Repo', minWidth: 14, maxWidth: 36 },
+      { key: 'integration', header: 'Integration base', minWidth: 14, maxWidth: 28 },
+      { key: 'integrationHead', header: 'Base SHA', minWidth: 10, maxWidth: 12 },
+      { key: 'primary', header: 'Primary', minWidth: 8, maxWidth: 20 },
+      { key: 'primaryHead', header: 'Primary SHA', minWidth: 10, maxWidth: 12 },
+      { key: 'containment', header: 'Contained', minWidth: 12, maxWidth: 24, clip: 'end' },
+      { key: 'live', header: 'Live upstream', minWidth: 10, maxWidth: 24, clip: 'end' },
+    ], rows, tableWidth, theme),
+  ];
+}
+
+function summarizePrimaryContainment(items) {
+  const counts = { contained: 0, 'not-contained': 0, unknown: 0 };
+  for (const { worktree } of items) {
+    if (worktree.defaultBranchContainment in counts) {
+      counts[worktree.defaultBranchContainment] += 1;
+    }
+  }
+
+  return `yes ${counts.contained}, no ${counts['not-contained']}, ? ${counts.unknown}`;
+}
+
+function colorPrimaryContainment(value, theme) {
+  if (/no [1-9]/.test(value)) return theme.bad(value);
+  if (/\? [1-9]/.test(value)) return theme.caution(value);
+  return theme.ok(value);
+}
+
+function summarizeLiveUpstreams(items) {
+  const counts = new Map();
+  for (const { worktree, branch } of items) {
+    const status = (branch ?? worktree).liveUpstreamStatus ?? 'not-requested';
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([status, count]) => `${status} ${count}`)
+    .join(', ');
+}
+
+function shortObjectId(value) {
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, 12) : '-';
 }
 
 const KEEPS_DETAIL_LIMIT = 12;
