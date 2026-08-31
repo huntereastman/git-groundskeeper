@@ -35,7 +35,19 @@ export function formatToolProvenance(tool = getToolProvenance()) {
 }
 
 function inspectLiveCheckout() {
+  // A packaged install may live inside another Git checkout (NVM itself is a
+  // common example). Only treat the package as development source when its own
+  // root contains Git metadata; never inherit provenance from an ancestor.
+  if (!fs.existsSync(path.join(packageRoot, '.git'))) return null;
+
   try {
+    const repositoryRoot = execFileSync(
+      'git',
+      ['-C', packageRoot, 'rev-parse', '--show-toplevel'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    if (fs.realpathSync(repositoryRoot) !== fs.realpathSync(packageRoot)) return null;
+
     const commit = execFileSync('git', ['-C', packageRoot, 'rev-parse', 'HEAD'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
