@@ -18,9 +18,45 @@ test('retire is read-only by default and emits a stable evidence receipt', async
   assert.equal(report.eligible, true);
   assert.equal(report.apply, false);
   assert.equal(report.branchPolicy, 'retain');
+  assert.equal(report.preservation.required, false);
+  assert.equal(report.preservation.itemCount, 0);
   assert.match(report.fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(fs.existsSync(fixture.linked), true);
+  assert.match(formatRetireText(report), /no dirty tracked or untracked work detected/);
   assert.match(formatRetireText(report), /No changes made/);
+});
+
+test('dirty retirement inventories work and requires a verified archival commit without discarding files', async (t) => {
+  const fixture = createFixture(t);
+  const trackedPath = path.join(fixture.linked, 'README.md');
+  const untrackedPath = path.join(fixture.linked, 'notes', 'recovered.md');
+  fs.writeFileSync(trackedPath, '# changed fixture\n');
+  fs.mkdirSync(path.dirname(untrackedPath));
+  fs.writeFileSync(untrackedPath, 'keep this work\n');
+
+  const report = await retireWorktree(fixture.linked, {
+    apply: true,
+    yes: true,
+    retainBranch: true,
+    inspectProcesses: noProcesses,
+  });
+
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.preservation.required, true);
+  assert.equal(report.preservation.inspectionComplete, true);
+  assert.deepEqual(
+    report.preservation.items.map((item) => item.path).sort(),
+    ['README.md', 'notes/recovered.md'],
+  );
+  assert.match(report.blockedReasons.join('\n'), /verified archival commit/);
+  const text = formatRetireText(report);
+  assert.match(text, /Preservation: REQUIRED \(2 dirty items\)/);
+  assert.match(text, /DIRTY:  M README\.md/);
+  assert.match(text, /DIRTY: \?\? notes\/recovered\.md/);
+  assert.match(text, /PROHIBITED: do not use restore, checkout --, clean, reset, force removal/);
+  assert.equal(fs.readFileSync(trackedPath, 'utf8'), '# changed fixture\n');
+  assert.equal(fs.readFileSync(untrackedPath, 'utf8'), 'keep this work\n');
+  assert.equal(fs.existsSync(fixture.linked), true);
 });
 
 test('retire apply revalidates, removes one checkout, and preserves its branch', async (t) => {

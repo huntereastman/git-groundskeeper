@@ -1,6 +1,6 @@
 # Git Worktree Retirement SOP
 
-Use this six-phase procedure to remove completed linked worktree checkouts from
+Use this seven-phase procedure to remove completed linked worktree checkouts from
 Hunter's Mac without losing uncommitted work, ignored evidence, local-only
 commits, active task state, or branches that should remain recoverable.
 
@@ -17,6 +17,15 @@ low-disk incident, use the [Disk Reclamation SOP](./DISK_RECLAMATION_SOP.md).
   future decision and is outside `retire`.
 - Never use direct recursive deletion, `git worktree remove --force`, or
   `git branch -D`.
+- Never use `git restore`, `git checkout --`, `git clean`, reset, forced
+  removal, or an equivalent discard operation to make a worktree eligible.
+- A dirty checkout is presumed to contain valuable work. Preserve all
+  human-authored, non-secret tracked and untracked changes in a verified local
+  archival commit on a retained branch before reconsidering retirement.
+- A preservation commit is a recovery checkpoint, not approval to merge it.
+- Credentials, caches, dependencies, build products, and disposable generated
+  artifacts may be excluded only after explicit classification. Record every
+  exclusion; leave uncertain or sensitive files untouched.
 - A dirty, locked, aliased, inspection-error, in-progress, submodule-bearing,
   active, or review-required-ignored-content checkout is blocked.
 - A detached checkout requires a verified retaining ref and receives a visible
@@ -72,7 +81,36 @@ Treat `Reclaimable after review` as an estimate, not deletion approval. Select
 one repository and one exact linked-worktree path. Refer to it by project and
 feature in discussion, then include the absolute Git path in the action record.
 
-## Phase 3 — Produce the exact retirement receipt
+## Phase 3 — Preserve dirty work
+
+If the selected worktree is dirty, stop retirement and inventory it completely:
+
+```bash
+git -C /absolute/path/to/selected-worktree status \
+  --short \
+  --untracked-files=all
+```
+
+Classify every item before staging. Preserve all human-authored, non-secret
+work, including intentional deletions and untracked files, in a local archival
+commit on the existing retained branch. If the checkout is detached, create a
+named local recovery branch first. Do not stage credentials or proven
+regenerable artifacts merely to make the status clean; record each exclusion
+and keep the checkout until excluded sensitive or uncertain data has been moved
+to an appropriate recoverable location.
+
+Before resuming retirement, verify and record all of the following:
+
+- the retained branch name;
+- the archival commit's full object ID;
+- the exact staged and committed path list;
+- every excluded path and its classification; and
+- a clean worktree status, with no discarded files.
+
+Later commits can refine, revert, or split the checkpoint. Do not rewrite the
+archival commit until another durable reference or bundle preserves it.
+
+## Phase 4 — Produce the exact retirement receipt
 
 Run `retire` against only the selected path:
 
@@ -88,6 +126,8 @@ Without `--apply`, this changes nothing. The receipt records:
 - branch or detached state and full HEAD object ID;
 - current bucket and measured bytes;
 - dirty state, locks, Git operations, aliases, and initialized submodules;
+- the complete tracked and untracked preservation inventory for dirty targets;
+- the required archival-checkpoint policy and prohibited discard shortcuts;
 - review-required and policy-classified ignored content;
 - detached-retention evidence;
 - active-process inspection;
@@ -107,7 +147,7 @@ ps -p 12345 -o pid=,ppid=,etime=,command=
 
 Do not kill a task merely to make the receipt eligible.
 
-## Phase 4 — Approve one immutable target and policy
+## Phase 5 — Approve one immutable target and policy
 
 Approval must name the exact path and branch policy. Use this form:
 
@@ -117,9 +157,9 @@ Approval must name the exact path and branch policy. Use this form:
 
 An instruction such as “clean old worktrees” is not an adequate action scope.
 If the path, branch, HEAD, owning task, or receipt changes after approval,
-return to Phase 3.
+return to Phase 4.
 
-## Phase 5 — Apply with immediate revalidation
+## Phase 6 — Apply with immediate revalidation
 
 Run exactly one approved action from outside the target checkout:
 
@@ -142,7 +182,7 @@ Generated `scan --commands` output remains useful for auditing individual Git
 guards, but it is not the primary SOP action path. Never pipe generated commands
 into a shell.
 
-## Phase 6 — Verify, record, and stop
+## Phase 7 — Verify, record, and stop
 
 An applied receipt must report `status: removed` and both postconditions:
 

@@ -121,6 +121,13 @@ is a read-only receipt. It rechecks the exact branch and full HEAD, Git status,
 ignored content, locks, in-progress operations, submodules, detached retention,
 and active processes immediately before ordinary `git worktree remove`.
 
+If tracked or untracked work exists, the receipt inventories every status item
+and blocks retirement until human-authored, non-secret work has been preserved
+in a verified local archival commit on a retained branch. Do not make a dirty
+checkout appear clean with `git restore`, `git checkout --`, `git clean`, reset,
+forced removal, or an equivalent discard operation. A preservation commit is a
+recovery checkpoint; it is not approval to merge the preserved work.
+
 ```bash
 # Inspect and save the structured evidence receipt.
 git-groundskeeper retire /path/to/worktree --retain-branch --json
@@ -130,7 +137,7 @@ git-groundskeeper retire /path/to/worktree --retain-branch --apply --yes
 ```
 
 The apply form never forces removal and never deletes local or remote branches.
-A detached checkout first receives a visible
+A detached clean checkout first receives a visible
 `git-groundskeeper/retained-detached/<object-id>` safety branch. Any changed or
 unknown evidence blocks the action and leaves the path in place.
 

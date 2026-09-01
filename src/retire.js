@@ -7,7 +7,7 @@ import { git } from './git.js';
 import { scanRoots } from './scanner.js';
 
 const execFileAsync = promisify(execFile);
-const RETIRE_SCHEMA_VERSION = 1;
+const RETIRE_SCHEMA_VERSION = 2;
 const RECLAIMABLE_TIERS = new Set(['worktree-only', 'worktree-and-branch']);
 
 export async function retireWorktree(targetPath, options = {}) {
@@ -94,6 +94,10 @@ export async function buildRetirePlan(targetPath, options = {}) {
     keepsDetails: true,
     sizes: true,
     scopeStrict: true,
+    // Retirement is an exact-path operation. Enumerate files inside untracked
+    // directories so the preservation receipt does not hide work behind a
+    // collapsed directory entry.
+    untrackedFiles: 'all',
     onProgress: options.onProgress,
   });
   const match = findWorktree(report, target);
@@ -104,6 +108,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
   const processes = await inspectProcesses(target, options);
   const blockedReasons = collectBlockedReasons(repo, worktree, processes);
   const eligible = blockedReasons.length === 0;
+  const preservation = buildPreservationEvidence(worktree);
   const evidence = {
     primaryPath: repo.primaryPath,
     target,
@@ -122,6 +127,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     retentionVerified: worktree.retentionVerified,
     retentionSource: worktree.retentionSource,
     containedIn: worktree.containedIn,
+    preservation,
     processCheck: processes,
   };
 
@@ -141,6 +147,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     bytes: worktree.bytes,
     branchPolicy: 'retain',
     taskOwnership: options.yes ? 'operator-confirmed-inactive' : 'confirm-before-apply',
+    preservation,
     ignoredContent: {
       reviewRequired: worktree.preciousIgnored,
       policyClassified: worktree.policyIgnored,
@@ -172,6 +179,21 @@ export function formatRetireText(report) {
     lines.push(`Process check: ${processState}`);
   }
 
+  if (report.preservation?.required) {
+    const count = report.preservation.itemCount;
+    lines.push(`Preservation: REQUIRED (${count} dirty ${count === 1 ? 'item' : 'items'})`);
+    for (const item of report.preservation.items) {
+      const original = item.originalPath ? ` <- ${item.originalPath}` : '';
+      lines.push(`DIRTY: ${item.code} ${item.path}${original}`);
+    }
+    lines.push('REQUIRED: preserve all human-authored, non-secret work in a verified archival commit on a retained branch, then rerun retire.');
+    lines.push('PROHIBITED: do not use restore, checkout --, clean, reset, force removal, or equivalent discard operations to make this worktree eligible.');
+  } else if (report.preservation?.inspectionComplete) {
+    lines.push('Preservation: no dirty tracked or untracked work detected');
+  } else if (report.preservation) {
+    lines.push('Preservation: REQUIRED; dirty-work inventory is unavailable, so leave the worktree untouched');
+  }
+
   if (report.fingerprint) lines.push(`Evidence: ${report.fingerprint}`);
   lines.push(`Decision: ${report.status}`);
 
@@ -190,7 +212,8 @@ function collectBlockedReasons(repo, worktree, processes) {
   const reasons = [];
   if (worktree.path === repo.primaryPath) reasons.push('target is the primary checkout');
   if (!RECLAIMABLE_TIERS.has(worktree.tier)) reasons.push(`bucket ${worktree.tier} is not eligible for checkout retirement`);
-  if (worktree.dirty !== false) reasons.push('worktree is dirty or cleanliness is unknown');
+  if (worktree.dirty === true) reasons.push('worktree has uncommitted tracked or untracked work; preserve it in a verified archival commit before retirement');
+  else if (worktree.dirty !== false) reasons.push('worktree cleanliness is unknown; leave it untouched until preservation can be verified');
   if (!isFullObjectId(worktree.headFull)) reasons.push('full HEAD object ID is unavailable');
   if (worktree.locked) reasons.push('worktree is locked');
   if (worktree.inProgress) reasons.push(`${worktree.inProgress} is in progress`);
@@ -202,6 +225,33 @@ function collectBlockedReasons(repo, worktree, processes) {
   if (!processes.ok) reasons.push(`active process inspection failed: ${processes.error}`);
   else if (processes.active) reasons.push('one or more active processes use the worktree');
   return unique(reasons);
+}
+
+function buildPreservationEvidence(worktree) {
+  const items = (worktree.entries ?? []).map((entry) => ({
+    code: entry.code,
+    path: entry.path,
+    originalPath: entry.originalPath ?? null,
+    staged: entry.staged === true,
+    unstaged: entry.unstaged === true,
+    untracked: entry.untracked === true,
+  }));
+  return {
+    required: worktree.dirty !== false,
+    inspectionComplete: worktree.dirty !== null,
+    itemCount: items.length,
+    items,
+    checkpointPolicy: 'verified-local-archival-commit-on-retained-branch',
+    checkpointIsMergeApproval: false,
+    forbiddenShortcuts: [
+      'git restore',
+      'git checkout --',
+      'git clean',
+      'git reset',
+      'git worktree remove --force',
+      'equivalent discard operations',
+    ],
+  };
 }
 
 async function inspectCurrentIdentity(target) {

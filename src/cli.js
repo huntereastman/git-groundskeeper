@@ -563,6 +563,9 @@ Worktree retirement:
   It rechecks cleanliness, ignored content, branch and full HEAD, locks, Git
   operations, submodules, detached retention, and active processes. Apply
   requires --retain-branch --apply --yes; branch deletion is never performed.
+  Dirty targets remain blocked. Their receipt inventories tracked and untracked
+  work and requires a verified archival commit; never use restore, clean, reset,
+  or force removal to make a target eligible.
 
 Retire options:
   --retain-branch        Explicitly preserve the attached branch. Required
