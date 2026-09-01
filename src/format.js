@@ -22,6 +22,8 @@ export function formatScanText(report, options = {}) {
   lines.push('Git Groundskeeper');
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push(`Roots: ${report.roots.join(', ')}`);
+  const scopeWarning = formatFilesystemRootWarning(report);
+  if (scopeWarning) lines.push(scopeWarning);
   lines.push(
     `Repos: ${summary.repoCount}, worktrees: ${summary.worktreeCount}, dirty worktrees: ${summary.dirtyWorktreeCount}, draft WIP: ${summary.draftWorktreeCount ?? 0}, aliased worktrees: ${summary.aliasedWorktreeCount ?? 0}, branches ahead: ${summary.branchAheadCount}, no upstream: ${summary.noUpstreamBranchCount}, upstream gone: ${summary.goneUpstreamBranchCount}, stashes: ${summary.stashCount}`,
   );
@@ -119,6 +121,8 @@ export function formatCompactScanText(report, options = {}) {
   lines.push('Git Groundskeeper Compact');
   lines.push(theme.muted(`Generated: ${report.generatedAt}`));
   lines.push(theme.muted(`Roots: ${report.roots.join(', ')}`));
+  const scopeWarning = formatFilesystemRootWarning(report);
+  if (scopeWarning) lines.push(theme.caution(scopeWarning));
   lines.push(
     [
       `In scope: ${theme.bold(scopedWorktrees.length)} ${plural(scopedWorktrees.length, 'worktree')}`,
@@ -515,6 +519,10 @@ export function formatTierBuckets(report, theme, tableWidth, options = {}) {
     theme.muted('? = no comparable upstream/base. Age = HEAD commit age, not proof of inactivity.'),
     '',
   ];
+  const repositoryEvidence = formatRepositoryIntegrationEvidence(items, report.roots, theme, tableWidth);
+  if (repositoryEvidence.length > 0) {
+    lines.push(...repositoryEvidence, '');
+  }
   const reclaimableItems = items.filter(({ worktree }) =>
     TIER_BUCKETS.some((bucket) => bucket.reclaimable && matchesTierBucket(bucket, worktree)),
   );
@@ -605,6 +613,91 @@ export function formatTierBuckets(report, theme, tableWidth, options = {}) {
   lines.push('');
 
   return lines;
+}
+
+function formatRepositoryIntegrationEvidence(items, roots, theme, tableWidth) {
+  const byRepo = new Map();
+  for (const item of items) {
+    if (!byRepo.has(item.repo)) byRepo.set(item.repo, []);
+    byRepo.get(item.repo).push(item);
+  }
+
+  const rows = [...byRepo.entries()].map(([repo, repoItems]) => {
+    const bases = [...new Set(repoItems
+      .map(({ worktree, branch }) => branch?.unmergedBase ?? worktree.unmergedBase)
+      .filter(Boolean))];
+    const baseHeads = [...new Set(repoItems
+      .map(({ worktree, branch }) => branch?.unmergedBaseHead ?? worktree.unmergedBaseHead)
+      .filter(Boolean))];
+    const containment = summarizePrimaryContainment(repoItems);
+    const liveUpstream = summarizeLiveUpstreams(repoItems);
+    const primary = repo.defaultBranch
+      ? repo.defaultBranchStatus === 'checked'
+        ? repo.defaultBranch
+        : `${repo.defaultBranch} (${repo.defaultBranchStatus})`
+      : repo.defaultBranchStatus === 'unavailable'
+        ? 'unavailable'
+        : '-';
+
+    return {
+      repo: repo.repository ?? shortenPath(repo.primaryPath, roots),
+      integration: bases.length > 0 ? bases.join(', ') : '-',
+      integrationHead: baseHeads.length > 0 ? baseHeads.map(shortObjectId).join(', ') : '-',
+      primary,
+      primaryHead: shortObjectId(repo.defaultBranchHead),
+      containment: colorPrimaryContainment(containment, theme),
+      live: liveUpstream,
+    };
+  });
+
+  if (rows.length === 0) return [];
+
+  return [
+    theme.bold('Repository integration evidence'),
+    theme.muted('Primary is the remote default branch. Containment is Git ancestry against its current SHA; ? means the local default ref was not current enough to prove it.'),
+    ...renderTable([
+      { key: 'repo', header: 'Repo', minWidth: 14, maxWidth: 36 },
+      { key: 'integration', header: 'Integration base', minWidth: 14, maxWidth: 28 },
+      { key: 'integrationHead', header: 'Base SHA', minWidth: 10, maxWidth: 12 },
+      { key: 'primary', header: 'Primary', minWidth: 8, maxWidth: 20 },
+      { key: 'primaryHead', header: 'Primary SHA', minWidth: 10, maxWidth: 12 },
+      { key: 'containment', header: 'Contained', minWidth: 12, maxWidth: 24, clip: 'end' },
+      { key: 'live', header: 'Live upstream', minWidth: 10, maxWidth: 24, clip: 'end' },
+    ], rows, tableWidth, theme),
+  ];
+}
+
+function summarizePrimaryContainment(items) {
+  const counts = { contained: 0, 'not-contained': 0, unknown: 0 };
+  for (const { worktree } of items) {
+    if (worktree.defaultBranchContainment in counts) {
+      counts[worktree.defaultBranchContainment] += 1;
+    }
+  }
+
+  return `yes ${counts.contained}, no ${counts['not-contained']}, ? ${counts.unknown}`;
+}
+
+function colorPrimaryContainment(value, theme) {
+  if (/no [1-9]/.test(value)) return theme.bad(value);
+  if (/\? [1-9]/.test(value)) return theme.caution(value);
+  return theme.ok(value);
+}
+
+function summarizeLiveUpstreams(items) {
+  const counts = new Map();
+  for (const { worktree, branch } of items) {
+    const status = (branch ?? worktree).liveUpstreamStatus ?? 'not-requested';
+    counts.set(status, (counts.get(status) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([status, count]) => `${status} ${count}`)
+    .join(', ');
+}
+
+function shortObjectId(value) {
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, 12) : '-';
 }
 
 const KEEPS_DETAIL_LIMIT = 12;
@@ -917,6 +1010,26 @@ function branchDeleteCommand(repoPath, branch) {
   ].join(' && ');
 }
 
+// Bind checkout removal to the exact identity the scan reviewed. Git already
+// refuses ordinary dirty-state changes, while these two guards close the clean
+// branch-switch and moved-HEAD races that `git worktree remove` cannot see.
+function attachedWorktreeRemoveCommand(repoPath, worktree, branch) {
+  const expectedHead = isFullObjectId(worktree.headFull)
+    ? worktree.headFull
+    : branch?.name === worktree.branch && isFullObjectId(branch.head)
+      ? branch.head
+      : null;
+  if (!worktree.branch || !expectedHead) return null;
+
+  const branchCheck = [
+    `git -C ${shellQuote(worktree.path)} symbolic-ref --quiet --short HEAD`,
+    `grep -Fqx -- ${shellQuote(worktree.branch)}`,
+  ].join(' | ');
+  const headCheck = `test "$(git -C ${shellQuote(worktree.path)} rev-parse --verify HEAD)" = ${shellQuote(expectedHead)}`;
+  const remove = `git -C ${shellQuote(repoPath)} worktree remove ${shellQuote(worktree.path)}`;
+  return `${branchCheck} && ${headCheck} && ${remove}`;
+}
+
 // A detached checkout has no branch of its own, so its scan-time retention
 // evidence can disappear before a pasted command runs. Recheck both the exact
 // detached HEAD and the durable ref, then materialize the scanned commit as a
@@ -986,7 +1099,9 @@ export function formatCleanupCommands(report, theme, only = null) {
     lines.push(theme.muted(`# ${bucket.label} (${inBucket.length})`));
 
     for (const { repo, worktree, branch } of inBucket) {
-      let removeWorktree = `git -C ${shellQuote(repo.primaryPath)} worktree remove ${shellQuote(worktree.path)}`;
+      let removeWorktree = worktree.detached
+        ? null
+        : attachedWorktreeRemoveCommand(repo.primaryPath, worktree, branch);
 
       if (worktree.detached) {
         removeWorktree = detachedWorktreeRemoveCommand(repo.primaryPath, worktree);
@@ -995,6 +1110,9 @@ export function formatCleanupCommands(report, theme, only = null) {
           continue;
         }
         lines.push(theme.muted(`# creates safety branch ${detachedSafetyRef(worktree).slice('refs/heads/'.length)}`));
+      } else if (!removeWorktree) {
+        lines.push(theme.muted(`# retained checkout ${worktree.path}: exact branch or full HEAD guard unavailable`));
+        continue;
       }
 
       // Branch retirement is a separate capability of the zero-unmerged
@@ -1848,6 +1966,10 @@ function shortenPath(candidatePath, roots) {
   for (const root of roots) {
     const normalizedRoot = normalizeComparablePath(root);
     if (isPathInside(normalizedRoot, normalizedCandidate)) {
+      // A path relative to `/` loses the leading slash and looks like a
+      // repository-relative path. Whole-filesystem scans must keep absolute
+      // paths so copied commands and visual comparisons are unambiguous.
+      if (normalizedRoot === path.parse(normalizedRoot).root) return normalizedCandidate;
       return path.relative(normalizedRoot, normalizedCandidate) || '.';
     }
 
@@ -1864,6 +1986,17 @@ function shortenPath(candidatePath, roots) {
   }
 
   return normalizedCandidate;
+}
+
+function formatFilesystemRootWarning(report) {
+  const scansFilesystemRoot = report.roots.some((root) => {
+    const normalizedRoot = normalizeComparablePath(root);
+    return normalizedRoot === path.parse(normalizedRoot).root;
+  });
+  if (!scansFilesystemRoot) return null;
+
+  const maxDepth = Number.isInteger(report.maxDepth) ? report.maxDepth : 8;
+  return `Scope warning: a filesystem-root scan includes system/tool-managed repositories and descends at most ${maxDepth} ${plural(maxDepth, 'directory', 'directories')} from each root. Prefer explicit workspace roots before acting on cleanup results.`;
 }
 
 function isInsideAnyRoot(candidatePath, roots) {

@@ -16,7 +16,7 @@ export async function git(cwd, args, options = {}) {
       // Never let a repository with a misconfigured remote block the scan on
       // a credential prompt. Remote probes are read-only and bounded; they do
       // not fetch or update any refs in the repository.
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, ...options.env, GIT_TERMINAL_PROMPT: '0' },
     });
 
     return { ok: true, stdout, stderr: '' };

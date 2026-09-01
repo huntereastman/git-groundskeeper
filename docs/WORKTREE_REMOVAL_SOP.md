@@ -1,387 +1,207 @@
-# How to Retire Git Worktrees Safely on This Mac
+# Git Worktree Retirement SOP
 
-> Git Groundskeeper Worktree Removal SOP
+Use this seven-phase procedure to remove completed linked worktree checkouts from
+Hunter's Mac without losing uncommitted work, ignored evidence, local-only
+commits, active task state, or branches that should remain recoverable.
 
-Use this procedure to clear completed Git worktrees from Hunter's Mac without
-losing uncommitted work, local-only commits, ignored evidence, active Codex
-tasks, or branches that should remain recoverable.
+This SOP removes whole linked checkouts. It never removes primary checkouts,
+local branches, remote branches, or unrelated worktree metadata. For generated
+output inside a retained checkout, use the
+[Worktree Cache Lifecycle Playbook](./WORKTREE_CACHE_LIFECYCLE.md). For a wider
+low-disk incident, use the [Disk Reclamation SOP](./DISK_RECLAMATION_SOP.md).
 
-This SOP removes whole worktree checkouts. It does not reorganize Codex's
-worktree directories, delete remote branches, clean primary checkouts, or treat
-cache cleanup as permission to remove a worktree.
+## Non-negotiable boundaries
 
-For generated-output cleanup inside a retained worktree, use the
-[Worktree Cache Lifecycle Playbook](./WORKTREE_CACHE_LIFECYCLE.md). For a
-machine-wide low-disk incident that includes containers, simulators, SDKs, and
-application caches, use the
-[Disk Reclamation SOP](./DISK_RECLAMATION_SOP.md).
+- Work one exact path at a time. Never use a shell loop or broad glob.
+- Preserve the branch during the first pass. Branch retirement is a separate
+  future decision and is outside `retire`.
+- Never use direct recursive deletion, `git worktree remove --force`, or
+  `git branch -D`.
+- Never use `git restore`, `git checkout --`, `git clean`, reset, forced
+  removal, or an equivalent discard operation to make a worktree eligible.
+- A dirty checkout is presumed to contain valuable work. Preserve all
+  human-authored, non-secret tracked and untracked changes in a verified local
+  archival commit on a retained branch before reconsidering retirement.
+- A preservation commit is a recovery checkpoint, not approval to merge it.
+- Credentials, caches, dependencies, build products, and disposable generated
+  artifacts may be excluded only after explicit classification. Record every
+  exclusion; leave uncertain or sensitive files untouched.
+- A dirty, locked, aliased, inspection-error, in-progress, submodule-bearing,
+  active, or review-required-ignored-content checkout is blocked.
+- A detached checkout requires a verified retaining ref and receives a visible
+  local safety branch before removal.
+- Old age, large size, or a merged-looking name is context, not permission.
+- Stop when evidence changes or becomes unknown.
 
-## Default policy
+## Phase 1 — Inventory the worktree forest
 
-1. Inventory the whole machine read-only.
-2. Select one repository and one exact batch for action.
-3. Refer to worktrees by project and feature name in reports. Use full paths
-   only in the approved removal plan and commands.
-4. Preserve local branches during the first removal pass. Branch retirement is
-   a later, separate decision.
-5. Remove one worktree at a time with `git worktree remove`. Never use direct
-   recursive deletion, `--force`, or a shell loop.
-6. Recheck Git state, ignored content, task ownership, and active processes
-   immediately before each removal.
-7. Stop on unknown or changed evidence. Do not turn a failed safety check into
-   permission to proceed.
-
-## Safety boundaries
-
-Never remove:
-
-- a primary checkout;
-- a dirty, locked, aliased, or inspection-error worktree;
-- a worktree with a merge, rebase, cherry-pick, bisect, or other Git operation
-  in progress;
-- a worktree owned by an active Codex task, IDE, terminal, build, test, or
-  simulator process;
-- a worktree containing review-required ignored content that has not been
-  classified;
-- a detached checkout without a verified retaining ref; or
-- a worktree merely because it is old, large, or has a merged-looking branch
-  name.
-
-Removing a worktree deletes every file beneath that checkout path, including
-ignored build output and local evidence. Git commit reachability alone does not
-prove the path is operationally unused.
-
-## 1. Record the starting state
-
-Record available disk space:
+Record free space, then run a read-only bucket scan across the standard
+worktree-bearing roots:
 
 ```bash
 df -h /System/Volumes/Data
-```
 
-Do not start new builds while preparing a cleanup batch.
-
-## 2. Run the machine-wide read-only inventory
-
-These are the standard worktree-bearing roots on this Mac:
-
-```bash
 git-groundskeeper scan \
   /Users/hunter/Development \
   /Users/hunter/.codex/worktrees \
   /Users/hunter/.github-runners \
   /Users/hunter/code \
   --sizes \
+  --scope-strict \
   --buckets \
   --keeps-details \
   --no-progress \
   --no-color
 ```
 
-The command is read-only. `--sizes` measures every discovered worktree,
-including primary, dirty, and blocked rows. Individual rows can include nested
-repositories; Groundskeeper excludes true descendants from aggregate totals so
-the same bytes are not counted twice.
+The default scan is read-only, including squash-merge detection: synthetic
+comparison objects are isolated in a temporary object database. Add
+`--no-squash-detect` only when speed matters more than squash-merge coverage.
 
-Use `--mine` only when you intentionally want to restrict the report to
-detected GitHub owners. A `--mine` report is not proof that no external,
-no-remote, or locally owned worktree exists.
+Every report records the running package version, commit, dirty state, and
+source mode. Stop if the operator expected the packaged stable CLI but the
+report says `development-checkout` or `dirty`.
 
-## 3. Interpret the buckets
+`--scope-strict` keeps repository-wide Git safety context but limits expensive
+size walks to the explicit roots. `--mine` is optional and must not be treated
+as proof that no external or no-remote worktree exists.
 
-| Bucket | Operator decision |
+## Phase 2 — Triage the buckets
+
+| Bucket | SOP decision |
 |---|---|
-| `ready if unused` | Candidate only. Confirm task and process inactivity before removal. |
-| `review: remove checkout, retain branch` | The checkout may be removable, but preserve the branch and review the named integration or upstream condition. |
-| `push first` | Do not remove automatically. Push or otherwise prove the exact tip is retained; preserve the local branch. |
-| `check first: ignored content here` | Inspect every reported keep. Preserve evidence or add a narrow repository policy only after proving regeneration. |
-| `blocked` / `inspection failed` / `aliased` | Do not remove. Resolve the exact blocker and scan again. |
+| `ready if unused` | Candidate only; continue to task/process confirmation. |
+| `review: remove checkout, retain branch` | Candidate only; preserve the branch and named integration context. |
+| `push first` | Stop. Push or otherwise establish durable retention, then rescan. |
+| `check first: ignored content here` | Stop. Preserve or explicitly classify every reported keep. |
+| `blocked`, `inspection failed`, `WIP`, `submodule`, `aliased` | Stop and resolve the named blocker. |
 | `primary checkout` | Never remove through this SOP. |
 
-`Reclaimable after review` is an estimate, not deletion approval.
+Treat `Reclaimable after review` as an estimate, not deletion approval. Select
+one repository and one exact linked-worktree path. Refer to it by project and
+feature in discussion, then include the absolute Git path in the action record.
 
-## 4. Build an exact project-scoped plan
+## Phase 3 — Preserve dirty work
 
-Choose one repository at a time. Record each proposed worktree with:
-
-| Field | Required value |
-|---|---|
-| Project | Human-readable repository name |
-| Feature | Task or feature name, not a generated directory ID |
-| Exact path | Absolute path used by Git |
-| Owning task | Codex task title and current state, or `none` |
-| Branch and tip | Local branch or detached state plus full object ID |
-| Groundskeeper bucket | Exact current classification |
-| Ignored content | `preciousIgnored`, `policyIgnored`, and disposition |
-| Size | Inclusive row size from the scan |
-| Planned action | Remove checkout only; preserve branch by default |
-
-The approval must name the exact batch and branch policy. Example:
-
-> Approve removal of the four listed checkout paths only. Preserve every local
-> and remote branch. Do not expand the batch, force removal, prune unrelated
-> metadata, or remove primary checkouts.
-
-An instruction such as "clean old worktrees" is not an adequate deletion
-scope.
-
-## 5. Generate guarded checkout-only candidates
-
-Re-run Groundskeeper against the exact project/worktree roots and request only
-commands whose classified action already retains the branch:
+If the selected worktree is dirty, stop retirement and inventory it completely:
 
 ```bash
-project_root="/absolute/path/to/primary-checkout"
-approved_worktree="/absolute/path/to/approved-worktree"
-
-git-groundskeeper scan "$project_root" "$approved_worktree" \
-  --sizes \
-  --buckets \
-  --keeps-details \
-  --commands=worktree-only \
-  --no-progress \
-  --no-color
+git -C /absolute/path/to/selected-worktree status \
+  --short \
+  --untracked-files=all
 ```
 
-Review the output. Do not pipe it into a shell. Copy and execute no more than
-one approved command at a time. Add other worktree roots only when their exact
-paths are part of the same approved batch; do not substitute the machine-wide
-parent directory in this command-generating pass.
+Classify every item before staging. Preserve all human-authored, non-secret
+work, including intentional deletions and untracked files, in a local archival
+commit on the existing retained branch. If the checkout is detached, create a
+named local recovery branch first. Do not stage credentials or proven
+regenerable artifacts merely to make the status clean; record each exclusion
+and keep the checkout until excluded sensitive or uncertain data has been moved
+to an appropriate recoverable location.
 
-`--commands=worktree-only` does not rewrite checkout-and-branch candidates into
-branch-preserving commands. It selects buckets whose existing action retains
-the branch. If a `ready if unused: remove checkout + branch` row should keep its
-branch, use the manual branch-preserving procedure below instead of running a
-generated checkout-and-branch command.
+Before resuming retirement, verify and record all of the following:
 
-## 6. Recheck one worktree immediately before removal
+- the retained branch name;
+- the archival commit's full object ID;
+- the exact staged and committed path list;
+- every excluded path and its classification; and
+- a clean worktree status, with no discarded files.
 
-Set exact, reviewed paths. Do not use unresolved variables or globs:
+Later commits can refine, revert, or split the checkpoint. Do not rewrite the
+archival commit until another durable reference or bundle preserves it.
+
+## Phase 4 — Produce the exact retirement receipt
+
+Run `retire` against only the selected path:
 
 ```bash
-primary="/absolute/path/to/primary-checkout"
-worktree="/absolute/path/to/approved-worktree"
+git-groundskeeper retire /absolute/path/to/selected-worktree \
+  --retain-branch \
+  --json > /approved/location/worktree-retirement-receipt.json
 ```
 
-Confirm Git still knows the path:
+Without `--apply`, this changes nothing. The receipt records:
+
+- canonical target and primary paths;
+- branch or detached state and full HEAD object ID;
+- current bucket and measured bytes;
+- dirty state, locks, Git operations, aliases, and initialized submodules;
+- the complete tracked and untracked preservation inventory for dirty targets;
+- the required archival-checkpoint policy and prohibited discard shortcuts;
+- review-required and policy-classified ignored content;
+- detached-retention evidence;
+- active-process inspection;
+- an evidence fingerprint; and
+- tool version and source provenance.
+
+In Codex, separately confirm that the owning task is landed, rejected,
+superseded, or deliberately closed. `Completed awaiting review` and `completed
+awaiting approval` are retention states. The CLI cannot infer task ownership;
+`--yes` is the operator's assertion that this check was completed.
+
+If process inspection lists a PID, identify it and let it finish:
 
 ```bash
-git -C "$primary" worktree list --porcelain
+ps -p 12345 -o pid=,ppid=,etime=,command=
 ```
 
-Confirm the checkout is still clean:
+Do not kill a task merely to make the receipt eligible.
+
+## Phase 5 — Approve one immutable target and policy
+
+Approval must name the exact path and branch policy. Use this form:
+
+> Approve removal of `/absolute/path/to/selected-worktree` only. Preserve its
+> local branch, create a safety branch if detached, do not delete any remote
+> branch, do not force removal, and do not expand the target.
+
+An instruction such as “clean old worktrees” is not an adequate action scope.
+If the path, branch, HEAD, owning task, or receipt changes after approval,
+return to Phase 4.
+
+## Phase 6 — Apply with immediate revalidation
+
+Run exactly one approved action from outside the target checkout:
 
 ```bash
-git -C "$worktree" status --short
+git-groundskeeper retire /absolute/path/to/selected-worktree \
+  --retain-branch \
+  --apply \
+  --yes \
+  --json
 ```
 
-Any output blocks removal until it is reviewed and preserved.
+The command runs the full plan twice, compares evidence fingerprints, then
+checks the branch and full HEAD again immediately before ordinary
+`git worktree remove`. It never passes `--force`. An attached branch is retained.
+A detached HEAD is first named as
+`git-groundskeeper/retained-detached/<full-object-id>` using an expected-old ref
+update. Any mismatch blocks removal and leaves the checkout in place.
 
-Record the exact branch and tip:
+Generated `scan --commands` output remains useful for auditing individual Git
+guards, but it is not the primary SOP action path. Never pipe generated commands
+into a shell.
 
-```bash
-branch=$(git -C "$worktree" branch --show-current)
-tip=$(git -C "$worktree" rev-parse HEAD)
-printf 'branch=%s\ntip=%s\n' "${branch:-detached}" "$tip"
-```
+## Phase 7 — Verify, record, and stop
 
-Confirm no process is using a file or directory inside the worktree:
+An applied receipt must report `status: removed` and both postconditions:
 
-```bash
-lsof -nP +D "$worktree"
-```
+- `targetRemoved: true`
+- `retainedRefExists: true`
 
-Any output means the worktree is active. Use the reported PID to identify the
-owner:
-
-```bash
-pid=12345
-ps -p "$pid" -o pid=,ppid=,etime=,command=
-```
-
-Let the owning task or process finish. Do not kill it merely to satisfy the
-cleanup plan.
-
-In Codex, confirm the task that owns the feature is landed, rejected,
-superseded, or otherwise deliberately closed. `completed awaiting review` and
-`completed awaiting approval` are retention states, not cleanup states.
-
-Finally, rerun the exact scoped Groundskeeper scan if any time has passed or
-any task, ref, ignored file, or process state changed.
-
-## 7. Remove the checkout while preserving its branch
-
-This manual procedure applies to an attached branch. For a detached checkout,
-use the exact `--commands=worktree-only` command emitted by Groundskeeper. That
-command rechecks the exact HEAD and retaining ref, creates a visible
-`git-groundskeeper/retained-detached/<object-id>` safety branch, rechecks HEAD,
-and only then removes the checkout. Do not simplify it to plain removal.
-
-Run Git's ordinary removal command from the primary checkout:
+Independently verify the selected path, registry, retained branch, and disk:
 
 ```bash
-git -C "$primary" worktree remove "$worktree"
-```
-
-Do not add `--force`. If Git refuses, stop and investigate the reported state.
-Do not replace the failed command with `rm -rf`.
-
-Immediately verify:
-
-```bash
-test ! -e "$worktree"
-git -C "$primary" worktree list --porcelain
-git -C "$primary" show-ref --verify "refs/heads/$branch"
+test ! -e /absolute/path/to/selected-worktree
+git -C /absolute/path/to/primary worktree list --porcelain
+git -C /absolute/path/to/primary show-ref --verify refs/heads/feature/name
 df -h /System/Volumes/Data
 ```
 
-The removed path must be absent, its worktree registration must be gone, and
-the local branch must still exist when the plan said to preserve it.
+For a detached checkout, verify the safety ref named in the receipt instead.
+Record the receipt with the task or maintenance log. Stop when the stated disk
+or hygiene objective is met; approval for one target never authorizes another.
 
-Repeat Sections 6 and 7 for the next approved path. Stop when sufficient disk
-headroom has been restored; approval for a batch does not require deleting the
-entire batch when the objective is already met.
-
-## 8. Handle conservative `push first` rows
-
-`push first` means Groundskeeper could not prove the branch tip is safely
-retained upstream. It does not always mean the content is absent from the
-integration branch.
-
-Before treating one as a manual checkout-only candidate, verify all of the
-following:
-
-1. the worktree is clean and inactive;
-2. the exact local tip is already an ancestor of the current integration base;
-3. the local integration ref matches the live remote integration tip; and
-4. the local branch will be preserved.
-
-For a repository whose integration branch is `main`:
-
-```bash
-tip=$(git -C "$worktree" rev-parse HEAD)
-local_main=$(git -C "$primary" rev-parse origin/main)
-remote_main=$(git -C "$primary" ls-remote origin refs/heads/main | awk '{print $1}')
-test "$local_main" = "$remote_main"
-git -C "$primary" merge-base --is-ancestor "$tip" "$local_main"
-git -C "$primary" rev-list --count "$local_main..$tip"
-```
-
-Proceed only when the live and local `main` tips match, the ancestry check exits
-successfully, and the final count is `0`. If they do not match, refresh the
-repository intentionally and rerun Groundskeeper. Do not infer safety from a
-stale `origin/main` ref.
-
-This is an explicit review exception. Keep the branch and record the evidence
-with the approved batch.
-
-## 9. Retire branches separately
-
-After checkout removal, scan again before considering local branch deletion:
-
-```bash
-project_root="/absolute/path/to/primary-checkout"
-
-git-groundskeeper scan "$project_root" \
-  --buckets \
-  --commands=branch \
-  --no-progress \
-  --no-color
-```
-
-Review and approve each branch independently. Generated branch commands recheck
-the integration base and exact scanned object ID before deleting the local ref.
-They never delete a remote branch.
-
-Keeping merged local branches is cheap and is the default when there is any
-uncertainty. Never use `git branch -D` as part of routine cleanup.
-
-## 10. Clean caches in worktrees that must remain
-
-If a worktree is retained because of source, review, or task state, its proven
-generated output can still be reclaimed separately:
-
-```bash
-# Read-only plan for one retained worktree.
-git-groundskeeper session-complete /absolute/path/to/worktree
-
-# Execute only supported, proven generated-output cleanup after exact approval.
-git-groundskeeper session-complete /absolute/path/to/worktree --apply --yes
-```
-
-This never removes the worktree or a branch.
-
-## 11. Finish and record the batch
-
-Run the original scoped scan again and record:
-
-- worktrees removed;
-- worktrees retained and why;
-- local branches retained or separately retired;
-- paths and registrations verified absent;
-- free space before and after;
-- logical worktree bytes removed versus filesystem available-space gain; and
-- any blocked or partial action.
-
-APFS sharing, snapshots, delayed accounting, and concurrent writes can make the
-filesystem gain differ from the sum of worktree sizes. Report both numbers.
-
-Update the owning task ledger so no task continues pointing at a removed path.
-
-## Stale registration procedure
-
-If a worktree directory is already missing, do not immediately run a broad
-prune. Preview all stale registrations first:
-
-```bash
-git -C "$primary" worktree prune --dry-run --verbose
-```
-
-Proceed with a real prune only after every item in the preview has been reviewed
-and approved. A prune can affect more than the worktree that triggered the
-investigation.
-
-## Troubleshooting
-
-### A process still uses the worktree
-
-Identify its task or owner and wait for a normal release. A process wait is not
-a Git blocker and does not authorize termination or force removal.
-
-### Groundskeeper reports ignored content
-
-Use `--keeps-details` and JSON to inspect the full `preciousIgnored` inventory.
-Preserve evidence, secrets, exports, databases, logs, archives, and generated
-configuration unless a repository-local policy proves an exact path disposable.
-
-### The branch has no upstream
-
-Keep the worktree or follow the explicit `push first` review in Section 8. A
-populated local branch and a similar-looking commit on `main` are not enough;
-verify the exact tip and live integration ref.
-
-### Git refuses ordinary removal
-
-Stop. Check dirty state, submodules, locks, Git operations, aliases, and active
-tasks. Do not escalate to `--force`, direct filesystem deletion, or automatic
-submodule deinitialization inside this SOP.
-
-### Free space did not increase as expected
-
-Compare `df -h /System/Volumes/Data` with the recorded worktree sizes. Check for
-APFS sharing or snapshots and whether active tools recreated caches elsewhere.
-Do not describe inclusive `du` totals as filesystem space gained.
-
-## Definition of done
-
-A worktree cleanup batch is complete only when:
-
-- every removed path was explicitly approved;
-- every worktree passed a fresh Git, ignored-content, task, and process check;
-- ordinary `git worktree remove` succeeded without force;
-- local and remote branches match the approved retention policy;
-- removed paths and registrations are absent;
-- no task ledger points to a removed worktree;
-- a final Groundskeeper scan records remaining attention items; and
-- logical bytes removed and filesystem free-space change are reported
-  separately.
+If the result is `blocked` or `partial`, do not use `rm -rf`, `--force`, manual
+metadata pruning, or branch deletion as a fallback. Preserve the checkout,
+investigate the exact reason, and restart at Phase 1 or Phase 3.
