@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,9 @@ const packageJson = readJson(path.join(packageRoot, 'package.json')) ?? {
 };
 
 export function getToolProvenance() {
+  const bundled = readBundledProvenance(process.argv[1]);
+  if (bundled) return bundled;
+
   const stamped = readJson(path.join(packageRoot, 'build-provenance.json')) ?? {};
   const live = inspectLiveCheckout();
 
@@ -19,6 +23,38 @@ export function getToolProvenance() {
     commit: live?.commit ?? stamped.commit ?? null,
     dirty: live?.dirty ?? stamped.dirty ?? null,
     source: live ? 'development-checkout' : stamped.source ?? 'package',
+  };
+}
+
+export function readBundledProvenance(scriptPath) {
+  if (typeof scriptPath !== 'string' || !path.isAbsolute(scriptPath)) return null;
+
+  // Embedders can ship a receipt beside the bundled entry point. Bind its
+  // reported source commit to the exact JavaScript payload we are executing.
+  const receipt = readJson(path.join(path.dirname(scriptPath), 'GitGroundskeeperProvenance.json'));
+  if (receipt?.schemaVersion !== 1
+    || receipt.name !== 'git-groundskeeper'
+    || typeof receipt.version !== 'string'
+    || !/^[0-9a-f]{40}$/i.test(receipt.commit ?? '')
+    || typeof receipt.dirty !== 'boolean'
+    || typeof receipt.source !== 'string'
+    || !/^[0-9a-f]{64}$/i.test(receipt.payloadSHA256 ?? '')) {
+    return null;
+  }
+
+  try {
+    const actualHash = createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
+    if (actualHash !== receipt.payloadSHA256.toLowerCase()) return null;
+  } catch {
+    return null;
+  }
+
+  return {
+    name: receipt.name,
+    version: receipt.version,
+    commit: receipt.commit,
+    dirty: receipt.dirty,
+    source: receipt.source,
   };
 }
 

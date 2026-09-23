@@ -498,6 +498,45 @@ test('forced progress in a pipe is milestone-based plain text', () => {
   assert.ok(stream.output.split('\n').filter(Boolean).length < 12, 'plain progress became a per-item log');
 });
 
+test('forced pipe progress carries live inventory totals without inventing unavailable counts', () => {
+  const stream = new MemoryStream({ isTTY: false, columns: 120 });
+  const reporter = createProgressReporter(
+    { progress: 'always', color: 'never', json: false },
+    stream,
+    { now: () => 0, env: {} },
+  );
+
+  reporter.update({
+    ...discoveryEvent(0, 0),
+    inventoryRoots: 3,
+    inventoryRepositories: null,
+    inventoryWorktrees: null,
+  });
+  reporter.update({
+    phase: 'worktrees',
+    label: 'Scanning worktrees',
+    completed: 0,
+    total: 20,
+    inventoryRoots: 3,
+    inventoryRepositories: 149,
+    inventoryWorktrees: 187,
+  });
+  reporter.update({
+    phase: 'complete',
+    label: 'Scan complete',
+    completed: 149,
+    total: 149,
+    inventoryRoots: 3,
+    inventoryRepositories: 149,
+    inventoryWorktrees: 187,
+  });
+  reporter.dispose();
+
+  assert.match(stream.output, /inventory=3,-,- \| Discovering repositories/);
+  assert.match(stream.output, /inventory=3,149,187 \| Scanning worktrees/);
+  assert.match(stream.output, /inventory=3,149,187 \| OK FOREST MAPPED/);
+});
+
 test('forced pipe progress starts fresh for every watch cycle', () => {
   const stream = new MemoryStream({ isTTY: false, columns: 80 });
   const reporter = createProgressReporter(
