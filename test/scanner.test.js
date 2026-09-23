@@ -111,6 +111,7 @@ test('scan roots and reported paths use canonical filesystem identities', async 
 test('scan-to-command output never targets a linked worktree outside a narrow root', async () => {
   const fixture = createFixture();
   const outside = path.join(fixture.parent, 'outside-narrow-root');
+  const progress = [];
   git(fixture.repo, ['worktree', 'add', '-b', 'feature/outside-narrow-root', outside, 'main']);
 
   const report = await scanRoots([fixture.repo], {
@@ -118,6 +119,7 @@ test('scan-to-command output never targets a linked worktree outside a narrow ro
     buckets: true,
     prCheck: false,
     liveRemoteCheck: false,
+    onProgress: (event) => progress.push(event),
   });
   const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
   assert.ok(repo.worktrees.some((worktree) => worktree.path === outside), 'repository context lost linked worktree');
@@ -129,6 +131,11 @@ test('scan-to-command output never targets a linked worktree outside a narrow ro
   });
   assert.doesNotMatch(output, new RegExp(escapeRegExp(outside)));
   assert.match(output, /Linked worktrees outside roots hidden: 1/);
+  assert.equal(
+    progress.find((event) => event.phase === 'worktrees')?.inventoryWorktrees,
+    0,
+    'live inventory totals must use the same authorized-root boundary as the report',
+  );
 });
 
 test('scanRoots marks clean gone-upstream worktrees as prune candidates when merged', async () => {
@@ -1539,6 +1546,49 @@ test('scanRoots reports nested submodule folders instead of Git storage paths', 
   assert.equal(primaryPaths.some((primaryPath) => primaryPath.includes(`${path.sep}.git${path.sep}`)), false);
   assert.ok(nestedRepo, primaryPaths.join('\n'));
   assert.equal(nestedRepo.worktrees.some((worktree) => worktree.path === nestedAdmin), true);
+});
+
+test('bucket scans identify dirty nested submodule repositories without default branch checks', async () => {
+  const fixture = createFixture();
+  const adminSource = path.join(fixture.parent, 'admin-source');
+  const linked = path.join(fixture.parent, 'linked-with-submodule');
+  const nestedAdmin = path.join(linked, 'admin');
+  const adminLinked = path.join(fixture.parent, 'admin-linked');
+
+  createStandaloneRepo(adminSource);
+  fs.mkdirSync(path.join(adminSource, 'dataconnect'));
+  for (const name of ['mutations.gql', 'queries.gql']) {
+    fs.writeFileSync(path.join(adminSource, 'dataconnect', name), '# original\n');
+  }
+  git(adminSource, ['add', 'dataconnect']);
+  git(adminSource, ['commit', '-m', 'add queries']);
+  git(fixture.repo, ['-c', 'protocol.file.allow=always', 'submodule', 'add', adminSource, 'admin']);
+  git(fixture.repo, ['commit', '-m', 'add admin submodule']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/submodule', linked, 'main']);
+  git(linked, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', 'admin']);
+  git(nestedAdmin, ['worktree', 'add', '-b', 'feature/admin', adminLinked]);
+  git(nestedAdmin, ['remote', 'set-url', 'origin', 'https://github.com/example/numbus-admin.git']);
+  for (const name of ['mutations.gql', 'queries.gql']) {
+    fs.appendFileSync(path.join(nestedAdmin, 'dataconnect', name), '# changed\n');
+  }
+  let defaultBranchChecks = 0;
+
+  const report = await scanRoots([nestedAdmin], {
+    maxDepth: 1,
+    buckets: true,
+    prCheck: false,
+    liveRemoteCheck: false,
+    squashDetect: false,
+    inspectPrimaryBranch: async () => { defaultBranchChecks += 1; return null; },
+  });
+  const repo = report.repos.find((candidate) => candidate.worktrees.some((worktree) => worktree.path === nestedAdmin));
+  const worktree = repo.worktrees.find((candidate) => candidate.path === nestedAdmin);
+
+  assert.equal(worktree.tier, 'blocked');
+  assert.equal(worktree.status.unstaged, 2);
+  assert.equal(repo.defaultBranchStatus, 'not-requested');
+  assert.equal(defaultBranchChecks, 0);
+  assert.equal(repo.repository, 'example/numbus-admin');
 });
 
 test('defaultRoots discovers from the home directory so no layout knowledge is needed', async () => {

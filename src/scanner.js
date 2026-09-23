@@ -134,6 +134,11 @@ export async function scanRoots(roots, options = {}) {
   const concurrency = resolveConcurrency(options);
   const limitDefaultBranchComparison = createDefaultBranchComparisonLimiter(Math.min(4, concurrency));
   const directoryIdentity = options.directoryIdentity ?? filesystemIdentity;
+  const inventoryProgress = {
+    inventoryRoots: normalizedRoots.length,
+    inventoryRepositories: null,
+    inventoryWorktrees: null,
+  };
 
   // Phase 1: filesystem discovery. The walk yields cooperatively so progress,
   // signals, and other event-loop work stay responsive across large forests.
@@ -144,25 +149,34 @@ export async function scanRoots(roots, options = {}) {
     total: null,
     visitedDirectories: 0,
     discoveredRepositories: 0,
+    ...inventoryProgress,
   });
-  const discoveredWorktrees = await discoverWorktreesAsync(normalizedRoots, options);
+  const discoveredWorktrees = await discoverWorktreesAsync(normalizedRoots, {
+    ...options,
+    inventoryProgress,
+  });
 
   // Phase 2: resolve each hit to its repository identity and ask Git for the
   // worktrees it owns. Only leaf Git calls run here, so pooling is safe.
   let identifiedCount = 0;
-  notifyProgress(options, progressEvent('resolve', 'Resolving repositories', identifiedCount, discoveredWorktrees.length));
+  notifyProgress(options, progressEvent('resolve', 'Resolving repositories', identifiedCount, discoveredWorktrees.length, inventoryProgress));
   const identified = await mapWithConcurrency(discoveredWorktrees, concurrency, async (worktreePath) => {
+    const commonDirProbe = await getCommonGitDir(worktreePath);
     const result = {
       worktreePath,
-      commonDir: await getCommonGitDir(worktreePath),
+      commonDir: commonDirProbe.commonDir,
+      resolutionError: commonDirProbe.error,
     };
     identifiedCount += 1;
     notifyProgress(
       options,
-      progressEvent('resolve', 'Resolving repositories', identifiedCount, discoveredWorktrees.length),
+      progressEvent('resolve', 'Resolving repositories', identifiedCount, discoveredWorktrees.length, inventoryProgress),
     );
     return result;
   });
+  const resolutionErrors = identified
+    .filter(({ resolutionError }) => resolutionError)
+    .map(({ worktreePath, resolutionError }) => `${worktreePath}: ${resolutionError}`);
 
   // Phase 3: group by common Git directory. Pure bookkeeping.
   const reposByCommonDir = new Map();
@@ -186,6 +200,7 @@ export async function scanRoots(roots, options = {}) {
   }
 
   const repoRecords = [...reposByCommonDir.values()];
+  inventoryProgress.inventoryRepositories = repoRecords.length;
 
   // Discovery often finds several linked worktrees from the same repository.
   // `git worktree list` is repository-wide, so ask once per common git dir
@@ -225,13 +240,13 @@ export async function scanRoots(roots, options = {}) {
   // huge working tree can hold a whole scan open by itself while `git status`
   // walks it. One config read per repository buys the right to skip all of it.
   let ownershipCount = 0;
-  notifyProgress(options, progressEvent('ownership', 'Reading repository ownership', ownershipCount, repoRecords.length));
+  notifyProgress(options, progressEvent('ownership', 'Reading repository ownership', ownershipCount, repoRecords.length, inventoryProgress));
   const ownersByRepo = await mapWithConcurrency(repoRecords, concurrency, async (repo) => {
     const owners = await listRemoteOwners(repo.primaryPath);
     ownershipCount += 1;
     notifyProgress(
       options,
-      progressEvent('ownership', 'Reading repository ownership', ownershipCount, repoRecords.length),
+      progressEvent('ownership', 'Reading repository ownership', ownershipCount, repoRecords.length, inventoryProgress),
     );
     return owners;
   });
@@ -244,6 +259,7 @@ export async function scanRoots(roots, options = {}) {
   const selectedRepos = options.onlyMine
     ? repoRecords.filter((repo) => repo.ownership === 'mine')
     : repoRecords;
+  inventoryProgress.inventoryRepositories = selectedRepos.length;
 
   // Phase 4: scan every selected worktree as one flat pool. Flattening matters:
   // a single repository with 71 worktrees would otherwise straggle while the
@@ -255,9 +271,13 @@ export async function scanRoots(roots, options = {}) {
       measureSize: !options.scopeStrict || isInsideAnyScanRoot(worktreePath, normalizedRoots),
     })),
   );
+  inventoryProgress.inventoryWorktrees = worktreeJobs.filter(
+    ({ repo, worktreePath }) =>
+      isInsideAnyScanRoot(worktreePath, normalizedRoots) && worktreePath !== repo.primaryPath,
+  ).length;
 
   let scannedWorktreeCount = 0;
-  notifyProgress(options, progressEvent('worktrees', 'Scanning worktrees', scannedWorktreeCount, worktreeJobs.length));
+  notifyProgress(options, progressEvent('worktrees', 'Scanning worktrees', scannedWorktreeCount, worktreeJobs.length, inventoryProgress));
   const scannedWorktrees = await mapWithConcurrency(
     worktreeJobs,
     concurrency,
@@ -271,7 +291,7 @@ export async function scanRoots(roots, options = {}) {
       scannedWorktreeCount += 1;
       notifyProgress(
         options,
-        progressEvent('worktrees', 'Scanning worktrees', scannedWorktreeCount, worktreeJobs.length),
+        progressEvent('worktrees', 'Scanning worktrees', scannedWorktreeCount, worktreeJobs.length, inventoryProgress),
       );
       return worktree;
     },
@@ -284,14 +304,14 @@ export async function scanRoots(roots, options = {}) {
 
   // Phase 5: repository-level work, using the worktrees already scanned.
   let finishedRepoCount = 0;
-  notifyProgress(options, progressEvent('analysis', 'Analyzing repositories', finishedRepoCount, selectedRepos.length));
+  notifyProgress(options, progressEvent('analysis', 'Analyzing repositories', finishedRepoCount, selectedRepos.length, inventoryProgress));
   const repos = (
     await mapWithConcurrency(selectedRepos, concurrency, async (repo) => {
       const finished = await finishRepo(repo, worktreesByRepo.get(repo), { ...options, limitDefaultBranchComparison });
       finishedRepoCount += 1;
       notifyProgress(
         options,
-        progressEvent('analysis', 'Analyzing repositories', finishedRepoCount, selectedRepos.length),
+        progressEvent('analysis', 'Analyzing repositories', finishedRepoCount, selectedRepos.length, inventoryProgress),
       );
       return finished;
     })
@@ -303,6 +323,7 @@ export async function scanRoots(roots, options = {}) {
     label: 'Scan complete',
     completed: repos.length,
     total: repos.length,
+    ...inventoryProgress,
   });
 
   return {
@@ -312,15 +333,17 @@ export async function scanRoots(roots, options = {}) {
     maxDepth: options.maxDepth ?? 8,
     summary: buildSummary(repos),
     repos,
+    errors: resolutionErrors,
   };
 }
 
-function progressEvent(phase, label, completed, total) {
+function progressEvent(phase, label, completed, total, inventoryProgress = {}) {
   return {
     phase,
     label,
     completed,
     total,
+    ...inventoryProgress,
   };
 }
 
@@ -448,6 +471,7 @@ function notifyDiscoveryProgress(options, visitedDirectories, discoveredReposito
     total: null,
     visitedDirectories,
     discoveredRepositories,
+    ...(options.inventoryProgress ?? {}),
   });
 }
 
@@ -536,12 +560,16 @@ async function finishRepo(repo, worktrees, options) {
   // repository's default branch is master. Keep those separate: cleanup still
   // uses the integration base, while the report names whether the exact tip is
   // also contained in the remote default branch.
+  // Repository identity is local inventory metadata, even when every checkout
+  // is dirty and no removal candidate needs remote default-branch evidence.
+  const getRepository = options.getRepositoryIdentity ?? getRepositoryIdentity;
+  const repository = await getRepository(primaryPath);
   const needsPrimaryBranchEvidence = options.buckets && worktrees.some(
     (worktree) => worktree.path !== primaryPath
       && ['worktree-only', 'worktree-and-branch', 'push-first'].includes(worktree.tier),
   );
   const primaryBranch = needsPrimaryBranchEvidence
-    ? await inspectPrimaryBranch(primaryPath, options)
+    ? await inspectPrimaryBranch(primaryPath, options, repository)
     : emptyPrimaryBranchEvidence();
   if (needsPrimaryBranchEvidence) {
     await annotatePrimaryBranchContainment(primaryPath, worktrees, branchMap, primaryBranch, options);
@@ -552,7 +580,7 @@ async function finishRepo(repo, worktrees, options) {
   return {
     primaryPath,
     commonDir: repo.commonDir,
-    repository: primaryBranch.repository,
+    repository,
     defaultBranch: primaryBranch.branch,
     defaultBranchRef: primaryBranch.ref,
     defaultBranchHead: primaryBranch.head,
@@ -720,11 +748,10 @@ function emptyPrimaryBranchEvidence() {
   };
 }
 
-async function inspectPrimaryBranch(cwd, options) {
-  const getRepository = options.getRepositoryIdentity ?? getRepositoryIdentity;
+async function inspectPrimaryBranch(cwd, options, repository) {
   const evidence = {
     ...emptyPrimaryBranchEvidence(),
-    repository: await getRepository(cwd),
+    repository,
   };
 
   if (options.liveRemoteCheck === false) {
@@ -2712,12 +2739,19 @@ async function getAheadBehind(cwd, left, right) {
 
 async function getCommonGitDir(cwd) {
   const result = await git(cwd, ['rev-parse', '--git-common-dir']);
-  if (!result.ok) return null;
+  if (!result.ok) {
+    return {
+      commonDir: null,
+      error: `git rev-parse --git-common-dir failed: ${result.stderr.trim() || 'unknown error'}`,
+    };
+  }
 
   const rawPath = result.stdout.trim();
-  if (!rawPath) return null;
+  if (!rawPath) {
+    return { commonDir: null, error: 'git rev-parse --git-common-dir returned an empty path' };
+  }
 
-  return canonicalPath(path.resolve(cwd, rawPath));
+  return { commonDir: canonicalPath(path.resolve(cwd, rawPath)), error: null };
 }
 
 function attachNestedRepoInfo(repos) {

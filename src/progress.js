@@ -455,7 +455,7 @@ export function createProgressReporter(options, stream = process.stderr, runtime
       renderedLines = 0;
       safeWrite(output);
     } else {
-      safeWrite(`${renderCompletionSummary(state, { color, unicode: false })}\n`);
+      safeWrite(`${renderInventoryPrefix(event)}${renderCompletionSummary(state, { color, unicode: false })}\n`);
     }
     // A reporter is reused by `watch`; milestones belong to one scan cycle.
     plainMilestones.clear();
@@ -734,19 +734,32 @@ function renderCompletionSummary(state, options) {
 
 function renderPlainProgressLine(event, columns) {
   const maxWidth = Math.max(1, columns - 1);
+  const inventoryPrefix = renderInventoryPrefix(event).slice(0, maxWidth);
+  const contentWidth = maxWidth - inventoryPrefix.length;
   if (!Number.isInteger(event.completed) || !Number.isInteger(event.total)) {
     const details = event.phase === 'discovery' && Number.isInteger(event.visitedDirectories)
       ? ` · ${event.visitedDirectories} dirs · ${event.discoveredRepositories ?? 0} repos`
       : '';
-    return `${event.label}${details}`.slice(0, maxWidth);
+    return `${inventoryPrefix}${`${event.label}${details}`.slice(0, contentWidth)}`;
   }
 
   const count = `${event.completed}/${event.total}`;
-  const available = maxWidth - event.label.length - count.length - 5;
+  const available = contentWidth - event.label.length - count.length - 5;
   const barWidth = Math.max(8, Math.min(30, available));
   const ratio = event.total === 0 ? 1 : Math.min(1, event.completed / event.total);
   const filled = Math.round(ratio * barWidth);
-  return `${event.label} [${'#'.repeat(filled)}${'-'.repeat(barWidth - filled)}] ${count}`.slice(0, maxWidth);
+  const progress = `${event.label} [${'#'.repeat(filled)}${'-'.repeat(barWidth - filled)}] ${count}`;
+  return `${inventoryPrefix}${progress.slice(0, contentWidth)}`;
+}
+
+function renderInventoryPrefix(event) {
+  if (!Number.isInteger(event.inventoryRoots)) return '';
+  const counters = [
+    event.inventoryRoots,
+    event.inventoryRepositories,
+    event.inventoryWorktrees,
+  ].map((value) => Number.isInteger(value) ? value : '-');
+  return `inventory=${counters.join(',')} | `;
 }
 
 function renderPhaseRail(state, width, unicode, theme) {

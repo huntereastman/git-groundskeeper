@@ -62,6 +62,9 @@ large filesystem. Because the dashboard stays on stderr, stdout remains safe to
 pipe or parse as JSON. `--progress` forces an escape-free milestone log when
 stderr is not interactive, `--no-progress` disables progress, and `--no-color`
 keeps the dashboard monochrome.
+Forced pipe progress prefixes each milestone with `inventory=roots,repositories,worktrees`;
+counts not known yet appear as `-`. This lets an embedding app show the live
+inventory without mistaking phase progress for a final total.
 
 For the maximal version, pass `--3d-progress`. It keeps the complete Deep
 Forest Telemetry dashboard and adds a framed, animated ASCII environment that
@@ -129,6 +132,10 @@ commit, dirty state, and whether the command is running from a development
 checkout or a packaged install. Keep `git-groundskeeper` installed from a
 package for stable operations; use `npm run dev -- ...` (or a separate local
 `git-groundskeeper-dev` launcher) when deliberately testing checkout changes.
+An embedded bundle can place `GitGroundskeeperProvenance.json` beside its
+JavaScript entry point. Its `payloadSHA256` must match that exact script, and
+its schema version, name, version, commit, dirty state, and source must be
+present; otherwise the normal package provenance path remains in effect.
 
 ## Retire one worktree
 
