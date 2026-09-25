@@ -141,6 +141,23 @@ A detached clean checkout first receives a visible
 `git-groundskeeper/retained-detached/<object-id>` safety branch. Any changed or
 unknown evidence blocks the action and leaves the path in place.
 
+An attached branch with unpushed commits remains blocked by default. If you
+intentionally want to keep its commits only in the local repository, inspect the
+read-only receipt and pass its **full** HEAD object ID on both the plan and apply
+commands:
+
+```bash
+FULL_HEAD=$(git -C /path/to/worktree rev-parse HEAD)
+git-groundskeeper retire /path/to/worktree --retain-branch --accept-local-only-head "$FULL_HEAD" --json
+git-groundskeeper retire /path/to/worktree --retain-branch --accept-local-only-head "$FULL_HEAD" --apply --yes
+```
+
+This opt-in does not make a local archival commit a remote backup or approve it
+for merge. Groundskeeper still blocks dirty, ignored-content, active, locked,
+in-progress, and otherwise unsafe checkouts; it rechecks the exact HEAD and
+retained branch immediately before removing the checkout. Keep an independent
+backup if losing this computer would be unacceptable.
+
 ## Reclaim Flutter build output
 
 `reclaim` inventories proven Flutter-generated output and is read-only by

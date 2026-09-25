@@ -75,6 +75,132 @@ test('retire apply revalidates, removes one checkout, and preserves its branch',
   assert.equal(git(fixture.repo, ['rev-parse', '--verify', `refs/heads/${fixture.branch}`]), fixture.head);
 });
 
+test('an unpushed branch needs an exact local-only HEAD acknowledgement', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, 'archive.md'), 'local archival evidence\n');
+  git(fixture.linked, ['add', 'archive.md']);
+  git(fixture.linked, ['commit', '-m', 'archive local evidence']);
+  const head = git(fixture.linked, ['rev-parse', 'HEAD']);
+
+  const defaultPlan = await retireWorktree(fixture.linked, {
+    retainBranch: true,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(defaultPlan.tier, 'push-first');
+  assert.equal(defaultPlan.status, 'blocked');
+  assert.equal(defaultPlan.localOnlyBranch.accepted, false);
+  assert.match(defaultPlan.blockedReasons.join('\n'), /accept-local-only-head/);
+
+  const stalePlan = await retireWorktree(fixture.linked, {
+    retainBranch: true,
+    acceptLocalOnlyHead: fixture.head,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(stalePlan.status, 'blocked');
+  assert.equal(stalePlan.localOnlyBranch.accepted, false);
+  assert.match(stalePlan.blockedReasons.join('\n'), /does not match the current full HEAD/);
+
+  const acceptedPlan = await retireWorktree(fixture.linked, {
+    retainBranch: true,
+    acceptLocalOnlyHead: head,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(acceptedPlan.status, 'planned');
+  assert.equal(acceptedPlan.eligible, true);
+  assert.equal(acceptedPlan.localOnlyBranch.remoteBackupVerified, false);
+  assert.equal(acceptedPlan.localOnlyBranch.accepted, true);
+  assert.match(formatRetireText(acceptedPlan), /losing the local repository can lose this commit/);
+  assert.equal(fs.existsSync(fixture.linked), true);
+});
+
+test('local-only acknowledgement does not bypass review-required ignored content', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, '.gitignore'), 'ignored-notes.txt\n');
+  fs.writeFileSync(path.join(fixture.linked, 'archive.md'), 'local archival evidence\n');
+  git(fixture.linked, ['add', '.gitignore', 'archive.md']);
+  git(fixture.linked, ['commit', '-m', 'archive local evidence']);
+  const head = git(fixture.linked, ['rev-parse', 'HEAD']);
+  fs.writeFileSync(path.join(fixture.linked, 'ignored-notes.txt'), 'separate work to review\n');
+
+  const report = await retireWorktree(fixture.linked, {
+    apply: true,
+    yes: true,
+    retainBranch: true,
+    acceptLocalOnlyHead: head,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.ignoredContent.reviewRequired.length > 0, true);
+  assert.equal(fs.existsSync(fixture.linked), true);
+  assert.equal(fs.existsSync(path.join(fixture.linked, 'ignored-notes.txt')), true);
+});
+
+test('local-only opt-in retires only a clean checkout and retains the exact commit', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, 'archive.md'), 'local archival evidence\n');
+  git(fixture.linked, ['add', 'archive.md']);
+  git(fixture.linked, ['commit', '-m', 'archive local evidence']);
+  const head = git(fixture.linked, ['rev-parse', 'HEAD']);
+
+  const dirtyPath = path.join(fixture.linked, 'not-archived.md');
+  fs.writeFileSync(dirtyPath, 'do not lose this\n');
+  const blocked = await retireWorktree(fixture.linked, {
+    apply: true,
+    yes: true,
+    retainBranch: true,
+    acceptLocalOnlyHead: head,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(fs.existsSync(dirtyPath), true);
+
+  fs.unlinkSync(dirtyPath);
+  const removed = await retireWorktree(fixture.linked, {
+    apply: true,
+    yes: true,
+    retainBranch: true,
+    acceptLocalOnlyHead: head,
+    inspectProcesses: noProcesses,
+  });
+  assert.equal(removed.status, 'removed');
+  assert.equal(removed.localOnlyBranch.accepted, true);
+  assert.equal(removed.verification.retainedRefExists, true);
+  assert.equal(fs.existsSync(fixture.linked), false);
+  assert.equal(git(fixture.repo, ['rev-parse', `refs/heads/${fixture.branch}`]), head);
+  assert.equal(git(fixture.repo, ['show', `${head}:archive.md`]), 'local archival evidence');
+});
+
+test('local-only opt-in blocks if HEAD changes between plan and apply', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, 'archive.md'), 'local archival evidence\n');
+  git(fixture.linked, ['add', 'archive.md']);
+  git(fixture.linked, ['commit', '-m', 'archive local evidence']);
+  const head = git(fixture.linked, ['rev-parse', 'HEAD']);
+  let scans = 0;
+  const changingScan = async (roots, options) => {
+    const report = await scanRoots(roots, options);
+    scans += 1;
+    if (scans === 1) {
+      fs.writeFileSync(path.join(fixture.linked, 'later.md'), 'later work\n');
+      git(fixture.linked, ['add', 'later.md']);
+      git(fixture.linked, ['commit', '-m', 'later work']);
+    }
+    return report;
+  };
+
+  const report = await retireWorktree(fixture.linked, {
+    apply: true,
+    yes: true,
+    retainBranch: true,
+    acceptLocalOnlyHead: head,
+    inspectProcesses: noProcesses,
+    scanRoots: changingScan,
+  });
+  assert.equal(report.status, 'blocked');
+  assert.equal(fs.existsSync(fixture.linked), true);
+  assert.equal(scans, 2);
+});
+
 test('changed evidence between retire plan and apply leaves the checkout untouched', async (t) => {
   const fixture = createFixture(t);
   let scans = 0;
@@ -135,6 +261,57 @@ test('retire CLI requires an exact target and explicit branch-retention apply po
   assert.notEqual(missingPolicy.status, 0);
   assert.match(missingPolicy.stderr, /requires the explicit --retain-branch policy/);
   assert.equal(fs.existsSync(fixture.linked), true);
+});
+
+test('local-only CLI flag requires a full HEAD and explicit branch retention', (t) => {
+  const fixture = createFixture(t);
+  const shortHead = spawnSync(process.execPath, [binPath, 'retire', fixture.linked, '--retain-branch', '--accept-local-only-head', fixture.head.slice(0, 12)], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const missingRetention = spawnSync(process.execPath, [binPath, 'retire', fixture.linked, '--accept-local-only-head', fixture.head], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const wrongCommand = spawnSync(process.execPath, [binPath, 'scan', fixture.repo, '--accept-local-only-head', fixture.head], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  assert.notEqual(shortHead.status, 0);
+  assert.match(shortHead.stderr, /full 40- or 64-character HEAD/);
+  assert.notEqual(missingRetention.status, 0);
+  assert.match(missingRetention.stderr, /requires --retain-branch/);
+  assert.notEqual(wrongCommand.status, 0);
+  assert.match(wrongCommand.stderr, /only valid with retire/);
+  assert.equal(fs.existsSync(fixture.linked), true);
+});
+
+test('local-only CLI apply retains the exact committed report on its branch', (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, 'report.md'), 'reviewed local report\n');
+  git(fixture.linked, ['add', 'report.md']);
+  git(fixture.linked, ['commit', '-m', 'archive report']);
+  const head = git(fixture.linked, ['rev-parse', 'HEAD']);
+
+  const result = spawnSync(process.execPath, [
+    binPath,
+    'retire',
+    fixture.linked,
+    '--retain-branch',
+    `--accept-local-only-head=${head}`,
+    '--apply',
+    '--yes',
+    '--json',
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.status, 'removed');
+  assert.equal(report.localOnlyBranch.accepted, true);
+  assert.equal(fs.existsSync(fixture.linked), false);
+  assert.equal(git(fixture.repo, ['rev-parse', `refs/heads/${fixture.branch}`]), head);
+  assert.equal(git(fixture.repo, ['show', `${head}:report.md`]), 'reviewed local report');
 });
 
 function createFixture(t) {

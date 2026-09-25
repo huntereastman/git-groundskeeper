@@ -106,7 +106,8 @@ export async function buildRetirePlan(targetPath, options = {}) {
   const { repo, worktree } = match;
   const inspectProcesses = options.inspectProcesses ?? inspectWorktreeProcesses;
   const processes = await inspectProcesses(target, options);
-  const blockedReasons = collectBlockedReasons(repo, worktree, processes);
+  const localOnlyBranch = localOnlyBranchEvidence(worktree, options);
+  const blockedReasons = collectBlockedReasons(repo, worktree, processes, localOnlyBranch);
   const eligible = blockedReasons.length === 0;
   const preservation = buildPreservationEvidence(worktree);
   const evidence = {
@@ -127,6 +128,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     retentionVerified: worktree.retentionVerified,
     retentionSource: worktree.retentionSource,
     containedIn: worktree.containedIn,
+    localOnlyBranch,
     preservation,
     processCheck: processes,
   };
@@ -147,6 +149,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     bytes: worktree.bytes,
     branchPolicy: 'retain',
     taskOwnership: options.yes ? 'operator-confirmed-inactive' : 'confirm-before-apply',
+    localOnlyBranch,
     preservation,
     ignoredContent: {
       reviewRequired: worktree.preciousIgnored,
@@ -169,6 +172,10 @@ export function formatRetireText(report) {
   if (report.head) lines.push(`Identity: ${report.branch ?? 'DETACHED'} @ ${report.head}`);
   if (report.tier) lines.push(`Bucket: ${report.tier}`);
   lines.push('Branch policy: retain (branch deletion is outside this command)');
+  if (report.localOnlyBranch) {
+    lines.push(`Remote backup: ${report.localOnlyBranch.risk}`);
+    lines.push(`Local-only HEAD acknowledgement: ${report.localOnlyBranch.accepted ? 'accepted' : 'required'} (${report.head})`);
+  }
 
   if (report.processCheck) {
     const processState = report.processCheck.ok
@@ -202,16 +209,26 @@ export function formatRetireText(report) {
   if (report.error) lines.push(`ERROR: ${report.error}`);
 
   if (!report.apply && report.eligible) {
-    lines.push('No changes made. Re-run the exact path with --retain-branch --apply --yes after confirming its owning task is inactive.');
+    const localOnlyFlag = report.localOnlyBranch?.accepted
+      ? ` --accept-local-only-head ${report.head}`
+      : '';
+    lines.push(`No changes made. Re-run the exact path with --retain-branch${localOnlyFlag} --apply --yes after confirming its owning task is inactive.`);
   }
 
   return lines.join('\n');
 }
 
-function collectBlockedReasons(repo, worktree, processes) {
+function collectBlockedReasons(repo, worktree, processes, localOnlyBranch) {
   const reasons = [];
   if (worktree.path === repo.primaryPath) reasons.push('target is the primary checkout');
-  if (!RECLAIMABLE_TIERS.has(worktree.tier)) reasons.push(`bucket ${worktree.tier} is not eligible for checkout retirement`);
+  if (localOnlyBranch?.requestedHead && !localOnlyBranch.accepted) {
+    reasons.push('--accept-local-only-head does not match the current full HEAD or branch retention was not requested');
+  }
+  if (!RECLAIMABLE_TIERS.has(worktree.tier) && !localOnlyBranch?.accepted) {
+    reasons.push(worktree.tier === 'push-first'
+      ? 'bucket push-first requires --retain-branch and --accept-local-only-head <full HEAD> to acknowledge the missing remote backup'
+      : `bucket ${worktree.tier} is not eligible for checkout retirement`);
+  }
   if (worktree.dirty === true) reasons.push('worktree has uncommitted tracked or untracked work; preserve it in a verified archival commit before retirement');
   else if (worktree.dirty !== false) reasons.push('worktree cleanliness is unknown; leave it untouched until preservation can be verified');
   if (!isFullObjectId(worktree.headFull)) reasons.push('full HEAD object ID is unavailable');
@@ -225,6 +242,22 @@ function collectBlockedReasons(repo, worktree, processes) {
   if (!processes.ok) reasons.push(`active process inspection failed: ${processes.error}`);
   else if (processes.active) reasons.push('one or more active processes use the worktree');
   return unique(reasons);
+}
+
+function localOnlyBranchEvidence(worktree, options) {
+  if (worktree.tier !== 'push-first') return null;
+  const requestedHead = options.acceptLocalOnlyHead ?? null;
+  return {
+    remoteBackupVerified: false,
+    risk: 'not verified for this HEAD; losing the local repository can lose this commit',
+    requestedHead,
+    accepted: options.retainBranch === true
+      && isFullObjectId(requestedHead)
+      && isFullObjectId(worktree.headFull)
+      && requestedHead.toLowerCase() === worktree.headFull.toLowerCase()
+      && worktree.detached === false
+      && Boolean(worktree.branch),
+  };
 }
 
 function buildPreservationEvidence(worktree) {
