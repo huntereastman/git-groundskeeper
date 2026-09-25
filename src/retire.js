@@ -98,6 +98,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     // directories so the preservation receipt does not hide work behind a
     // collapsed directory entry.
     untrackedFiles: 'all',
+    inspectIgnoredOnDirtyPath: target,
     onProgress: options.onProgress,
   });
   const match = findWorktree(report, target);
@@ -125,6 +126,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
     submodules: worktree.submodules,
     preciousIgnored: worktree.preciousIgnored,
     policyIgnored: worktree.policyIgnored,
+    ignoredInspection: worktree.ignoredInspection,
     retentionVerified: worktree.retentionVerified,
     retentionSource: worktree.retentionSource,
     containedIn: worktree.containedIn,
@@ -152,8 +154,12 @@ export async function buildRetirePlan(targetPath, options = {}) {
     localOnlyBranch,
     preservation,
     ignoredContent: {
+      inspectionStatus: worktree.ignoredInspection ?? 'unknown',
       reviewRequired: worktree.preciousIgnored,
       policyClassified: worktree.policyIgnored,
+      errors: worktree.inspectionErrors
+        .filter((item) => item.probe === 'ignored-files' || item.probe === 'ignored-policy')
+        .map((item) => item.message),
     },
     processCheck: processes,
     blockedReasons,
@@ -201,6 +207,20 @@ export function formatRetireText(report) {
     lines.push('Preservation: REQUIRED; dirty-work inventory is unavailable, so leave the worktree untouched');
   }
 
+  if (report.ignoredContent) {
+    lines.push(`Ignored-content inspection: ${report.ignoredContent.inspectionStatus}`);
+    for (const filePath of report.ignoredContent.reviewRequired ?? []) {
+      lines.push(`KEEP IGNORED: ${filePath}`);
+    }
+    const policyCount = report.ignoredContent.policyClassified?.length ?? 0;
+    if (policyCount > 0) {
+      lines.push(`Policy-classified ignored content: ${policyCount} ${policyCount === 1 ? 'item' : 'items'} (paths and reasons in --json)`);
+    }
+    for (const message of report.ignoredContent.errors ?? []) {
+      lines.push(`IGNORED INSPECTION ERROR: ${message}`);
+    }
+  }
+
   if (report.fingerprint) lines.push(`Evidence: ${report.fingerprint}`);
   lines.push(`Decision: ${report.status}`);
 
@@ -238,6 +258,9 @@ function collectBlockedReasons(repo, worktree, processes, localOnlyBranch) {
   if (worktree.aliasedWorktreePaths?.length > 0) reasons.push('worktree path has a filesystem alias');
   if (worktree.submodules?.length > 0) reasons.push('worktree has initialized submodules');
   if (worktree.preciousIgnored?.length > 0) reasons.push('review-required ignored content exists');
+  if (worktree.path !== repo.primaryPath && worktree.ignoredInspection !== 'complete') {
+    reasons.push(`ignored content inspection ${worktree.ignoredInspection ?? 'unknown'}`);
+  }
   if (worktree.detached && worktree.retentionVerified !== true) reasons.push('detached HEAD has no verified retaining ref');
   if (!processes.ok) reasons.push(`active process inspection failed: ${processes.error}`);
   else if (processes.active) reasons.push('one or more active processes use the worktree');

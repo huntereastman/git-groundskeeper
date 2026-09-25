@@ -906,16 +906,23 @@ async function scanWorktree(worktreePath, options, primaryPath, ignoredContentPo
   const gitDir = resolveGitDir(worktreePath);
   if (!gitDir) inspectionErrors.push(inspectionError('git-dir', 'could not resolve worktree git directory'));
   const worktreeGitDir = gitDir ? safeRealpath(gitDir) ?? path.resolve(gitDir) : null;
-  // Only clean worktrees can be proposed for removal, so they are the only ones
-  // whose hidden files matter. This keeps the extra call off the majority.
+  // Bulk scans skip ignored content in dirty worktrees for speed. Exact-path
+  // retirement receipts opt in so a dirty target's hidden files are visible.
   let preciousIgnored = [];
   let policyIgnored = [];
-  if (dirty === false && worktreePath !== primaryPath) {
+  let ignoredInspection = worktreePath === primaryPath
+    ? 'not-applicable'
+    : dirty === true ? 'skipped-dirty' : 'skipped-unknown-status';
+  if (worktreePath !== primaryPath && (dirty === false || (dirty === true && options.inspectIgnoredOnDirtyPath === worktreePath))) {
     const inspectIgnored = options.inspectPreciousIgnored ?? inspectPreciousIgnored;
     const ignoredProbe = await inspectIgnored(worktreePath, primaryPath, ignoredContentPolicy);
     preciousIgnored = ignoredProbe.precious ?? [];
     policyIgnored = ignoredProbe.policyIgnored ?? [];
-    for (const error of ignoredProbe.errors ?? []) {
+    const ignoredErrors = ignoredProbe.errors ?? [];
+    ignoredInspection = ignoredErrors.length > 0 || (ignoredContentPolicy?.errors?.length ?? 0) > 0
+      ? 'failed'
+      : 'complete';
+    for (const error of ignoredErrors) {
       inspectionErrors.push(inspectionError('ignored-files', error));
     }
   }
@@ -978,6 +985,7 @@ async function scanWorktree(worktreePath, options, primaryPath, ignoredContentPo
     submodules,
     preciousIgnored,
     policyIgnored,
+    ignoredInspection,
     branch: branch ?? null,
     detached,
     head: headProbe.head ?? '',
