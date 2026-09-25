@@ -20,8 +20,11 @@ test('retire is read-only by default and emits a stable evidence receipt', async
   assert.equal(report.branchPolicy, 'retain');
   assert.equal(report.preservation.required, false);
   assert.equal(report.preservation.itemCount, 0);
+  assert.equal(report.ignoredContent.inspectionStatus, 'complete');
+  assert.deepEqual(report.ignoredContent.reviewRequired, []);
   assert.match(report.fingerprint, /^[0-9a-f]{64}$/);
   assert.equal(fs.existsSync(fixture.linked), true);
+  assert.match(formatRetireText(report), /Ignored-content inspection: complete/);
   assert.match(formatRetireText(report), /no dirty tracked or untracked work detected/);
   assert.match(formatRetireText(report), /No changes made/);
 });
@@ -57,6 +60,59 @@ test('dirty retirement inventories work and requires a verified archival commit 
   assert.equal(fs.readFileSync(trackedPath, 'utf8'), '# changed fixture\n');
   assert.equal(fs.readFileSync(untrackedPath, 'utf8'), 'keep this work\n');
   assert.equal(fs.existsSync(fixture.linked), true);
+});
+
+test('dirty retirement receipt inspects and names unique ignored exports', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, '.gitignore'), 'exportedData/\n');
+  git(fixture.linked, ['add', '.gitignore']);
+  git(fixture.linked, ['commit', '-m', 'ignore local exports']);
+  git(fixture.linked, ['push']);
+  fs.writeFileSync(path.join(fixture.linked, 'README.md'), '# dirty fixture\n');
+  const exportPath = path.join(fixture.linked, 'exportedData', 'auth_export', 'accounts.json');
+  fs.mkdirSync(path.dirname(exportPath), { recursive: true });
+  fs.writeFileSync(exportPath, '{}\n');
+
+  const inventory = await scanRoots([fixture.linked], { buckets: true });
+  const inventoryWorktree = inventory.repos
+    .flatMap((repo) => repo.worktrees)
+    .find((worktree) => worktree.path === fixture.linked);
+  assert.equal(inventoryWorktree.ignoredInspection, 'skipped-dirty');
+
+  const report = await retireWorktree(fixture.linked, { inspectProcesses: noProcesses });
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.ignoredContent.inspectionStatus, 'complete');
+  assert.deepEqual(report.ignoredContent.reviewRequired, ['exportedData/auth_export/accounts.json']);
+  assert.match(report.blockedReasons.join('\n'), /review-required ignored content exists/);
+  assert.match(formatRetireText(report), /KEEP IGNORED: exportedData\/auth_export\/accounts\.json/);
+  const withPolicy = {
+    ...report,
+    ignoredContent: {
+      ...report.ignoredContent,
+      policyClassified: [{ path: 'cache/', rule: 'cache/', reason: 'regenerable' }],
+    },
+  };
+  assert.match(formatRetireText(withPolicy), /Policy-classified ignored content: 1 item/);
+  assert.equal(fs.existsSync(exportPath), true);
+});
+
+test('ignored inspection failure is explicit in a dirty retirement receipt', async (t) => {
+  const fixture = createFixture(t);
+  fs.writeFileSync(path.join(fixture.linked, 'README.md'), '# dirty fixture\n');
+
+  const report = await retireWorktree(fixture.linked, {
+    inspectProcesses: noProcesses,
+    inspectPreciousIgnored: async () => ({
+      precious: [],
+      policyIgnored: [],
+      errors: ['injected ignored-file failure'],
+    }),
+  });
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.ignoredContent.inspectionStatus, 'failed');
+  assert.deepEqual(report.ignoredContent.reviewRequired, []);
+  assert.match(report.blockedReasons.join('\n'), /safety inspections failed/);
+  assert.match(formatRetireText(report), /Ignored-content inspection: failed/);
 });
 
 test('retire apply revalidates, removes one checkout, and preserves its branch', async (t) => {

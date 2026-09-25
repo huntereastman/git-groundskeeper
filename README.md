@@ -128,6 +128,13 @@ checkout appear clean with `git restore`, `git checkout --`, `git clean`, reset,
 forced removal, or an equivalent discard operation. A preservation commit is a
 recovery checkpoint; it is not approval to merge the preserved work.
 
+The exact-path receipt also inspects ignored content even when the checkout is
+dirty. Its `ignoredContent.inspectionStatus` distinguishes `complete` from
+`failed` or a skipped/unknown inspection; an empty `reviewRequired` list is
+meaningful only when inspection completed. Text receipts list each
+review-required ignored path and summarize repository-policy classifications;
+the JSON receipt retains their complete paths and reasons.
+
 ```bash
 # Inspect and save the structured evidence receipt.
 git-groundskeeper retire /path/to/worktree --retain-branch --json
