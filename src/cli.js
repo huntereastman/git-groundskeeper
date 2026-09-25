@@ -155,6 +155,7 @@ function parseArgs(argv) {
     workflowRefs: [],
     minFreeGb: null,
     retainBranch: false,
+    acceptLocalOnlyHead: null,
     retireOptionUsed: false,
   };
 
@@ -277,6 +278,12 @@ function parseArgs(argv) {
     } else if (arg === '--retain-branch') {
       options.retainBranch = true;
       options.retireOptionUsed = true;
+    } else if (arg === '--accept-local-only-head') {
+      options.acceptLocalOnlyHead = parseFullObjectId(args.shift(), '--accept-local-only-head');
+      options.retireOptionUsed = true;
+    } else if (arg.startsWith('--accept-local-only-head=')) {
+      options.acceptLocalOnlyHead = parseFullObjectId(arg.slice('--accept-local-only-head='.length), '--accept-local-only-head');
+      options.retireOptionUsed = true;
     } else if (arg === '--full-clean') {
       options.fullClean = true;
       options.reclaimOptionUsed = true;
@@ -335,11 +342,14 @@ function parseArgs(argv) {
     throw new Error('--tool, --apply, --yes, --full-clean, --exclude-primary, --worktrees-only, --min-age-minutes, --workflow-root, --workflow-ref, and --min-free-gb are only valid with reclaim, retire, or disk-pressure.');
   }
   if (command !== 'retire' && options.retireOptionUsed) {
-    throw new Error('--retain-branch is only valid with retire.');
+    throw new Error('--retain-branch and --accept-local-only-head are only valid with retire.');
   }
   if (command === 'retire') {
     if (options.toolOptionUsed || options.fullClean || options.excludePrimary || options.worktreesOnly || options.minAgeOptionUsed || options.workflowRoots.length > 0 || options.workflowRefs.length > 0 || options.diskPressureOptionUsed) {
-      throw new Error('retire accepts scan evidence options plus --retain-branch --apply --yes; reclaim and disk-pressure options are not valid.');
+      throw new Error('retire accepts scan evidence options plus --retain-branch, --accept-local-only-head, --apply, and --yes; reclaim and disk-pressure options are not valid.');
+    }
+    if (options.acceptLocalOnlyHead && !options.retainBranch) {
+      throw new Error('--accept-local-only-head requires --retain-branch.');
     }
     if (options.apply && !options.retainBranch) {
       throw new Error('Worktree retirement requires the explicit --retain-branch policy.');
@@ -385,6 +395,14 @@ function parseValue(value, flag) {
   const parsed = (value ?? '').trim();
   if (!parsed || parsed.startsWith('-')) throw new Error(`${flag} requires a value`);
   return parsed;
+}
+
+function parseFullObjectId(value, flag) {
+  const parsed = parseValue(value, flag);
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(parsed)) {
+    throw new Error(`${flag} requires the full 40- or 64-character HEAD object ID`);
+  }
+  return parsed.toLowerCase();
 }
 
 function parsePositiveInteger(value, flag) {
@@ -566,10 +584,15 @@ Worktree retirement:
   Dirty targets remain blocked. Their receipt inventories tracked and untracked
   work and requires a verified archival commit; never use restore, clean, reset,
   or force removal to make a target eligible.
+  An unpushed branch remains blocked by default. To retain it locally without
+  a verified remote backup, explicitly acknowledge its full HEAD object ID.
 
 Retire options:
   --retain-branch        Explicitly preserve the attached branch. Required
                          with --apply; detached HEADs receive a safety branch.
+  --accept-local-only-head <full HEAD>
+                         Opt in to retiring a clean push-first checkout while
+                         keeping its branch only in the local repository.
 
 Examples:
   git-groundskeeper scan
@@ -594,6 +617,7 @@ Examples:
   git-groundskeeper session-complete ~/Development/MyApp-worktrees/feature
   git-groundskeeper session-complete ~/Development/MyApp-worktrees/feature --apply --yes
   git-groundskeeper retire ~/Development/MyApp-worktrees/feature --retain-branch
+  git-groundskeeper retire ~/Development/MyApp-worktrees/feature --retain-branch --accept-local-only-head <full HEAD>
   git-groundskeeper retire ~/Development/MyApp-worktrees/feature --retain-branch --apply --yes
   git-groundskeeper reclaim ~/Development/codex-island --tool xcode --apply --yes
 `);
