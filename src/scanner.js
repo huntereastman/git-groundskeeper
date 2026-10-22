@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { git, mustGit } from './git.js';
+import { inspectLivePrimaryBranch, inspectDefaultBranchContainment } from './default-branch.js';
 import {
   listMergedPullRequestBranches,
   listOpenDraftPullRequestBranches,
@@ -112,6 +113,18 @@ export async function mapWithConcurrency(items, limit, mapper) {
   return results;
 }
 
+function createDefaultBranchComparisonLimiter(limit) {
+  // This pool is independent of the repository workers. Sharing it across
+  // repositories bounds Git processes without nesting the repository pool.
+  const running = new Set();
+  return async (compare) => {
+    while (running.size >= limit) await Promise.race(running).catch(() => {});
+    const result = Promise.resolve().then(compare);
+    running.add(result);
+    try { return await result; } finally { running.delete(result); }
+  };
+}
+
 export async function scanRoots(roots, options = {}) {
   const startedAt = new Date().toISOString();
   // macOS exposes /tmp as a symlink to /private/tmp. Keep one canonical path
@@ -119,6 +132,7 @@ export async function scanRoots(roots, options = {}) {
   // same directory for an out-of-root worktree.
   const normalizedRoots = roots.map(canonicalPath);
   const concurrency = resolveConcurrency(options);
+  const limitDefaultBranchComparison = createDefaultBranchComparisonLimiter(Math.min(4, concurrency));
   const directoryIdentity = options.directoryIdentity ?? filesystemIdentity;
 
   // Phase 1: filesystem discovery. The walk yields cooperatively so progress,
@@ -273,7 +287,7 @@ export async function scanRoots(roots, options = {}) {
   notifyProgress(options, progressEvent('analysis', 'Analyzing repositories', finishedRepoCount, selectedRepos.length));
   const repos = (
     await mapWithConcurrency(selectedRepos, concurrency, async (repo) => {
-      const finished = await finishRepo(repo, worktreesByRepo.get(repo), options);
+      const finished = await finishRepo(repo, worktreesByRepo.get(repo), { ...options, limitDefaultBranchComparison });
       finishedRepoCount += 1;
       notifyProgress(
         options,
@@ -530,7 +544,7 @@ async function finishRepo(repo, worktrees, options) {
     ? await inspectPrimaryBranch(primaryPath, options)
     : emptyPrimaryBranchEvidence();
   if (needsPrimaryBranchEvidence) {
-    await annotatePrimaryBranchContainment(primaryPath, worktrees, branchMap, primaryBranch);
+    await annotatePrimaryBranchContainment(primaryPath, worktrees, branchMap, primaryBranch, options);
   }
 
   const stashes = await listStashes(primaryPath);
@@ -544,6 +558,7 @@ async function finishRepo(repo, worktrees, options) {
     defaultBranchHead: primaryBranch.head,
     defaultBranchStatus: primaryBranch.status,
     defaultBranchCheckedAt: primaryBranch.checkedAt,
+    defaultBranchError: primaryBranch.error ?? null,
     ignoredContentPolicy: {
       source: repo.ignoredContentPolicy.source,
       ruleCount: repo.ignoredContentPolicy.rules.length,
@@ -701,6 +716,7 @@ function emptyPrimaryBranchEvidence() {
     head: null,
     status: 'not-requested',
     checkedAt: null,
+    error: null,
   };
 }
 
@@ -718,8 +734,13 @@ async function inspectPrimaryBranch(cwd, options) {
   const inspect = options.inspectPrimaryBranch ?? inspectLivePrimaryBranch;
   try {
     const primary = await inspect(cwd, DEFAULT_REMOTE);
-    if (!primary?.branch || !primary.head) {
-      return { ...evidence, status: 'unavailable' };
+    if (!primary?.branch || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(primary.head ?? '')) {
+      return {
+        ...evidence,
+        status: 'unavailable',
+        checkedAt: primary?.checkedAt ?? null,
+        error: primary?.error ?? null,
+      };
     }
 
     return {
@@ -728,7 +749,8 @@ async function inspectPrimaryBranch(cwd, options) {
       ref: `${DEFAULT_REMOTE}/${primary.branch}`,
       head: primary.head,
       status: 'checked',
-      checkedAt: new Date().toISOString(),
+      checkedAt: primary.checkedAt ?? new Date().toISOString(),
+      error: null,
     };
   } catch {
     return { ...evidence, status: 'unavailable' };
@@ -741,95 +763,33 @@ async function getRepositoryIdentity(cwd) {
   return parseRemoteRepository(result.stdout.trim());
 }
 
-async function inspectLivePrimaryBranch(cwd, remote) {
-  // --symref reads the remote's HEAD without fetching or changing any local
-  // reference. The ordinary SHA line is the exact remote tip we must match
-  // before relying on a locally cached origin/<default> for containment.
-  const result = await git(cwd, ['ls-remote', '--symref', remote, 'HEAD'], {
-    timeoutMs: LIVE_REMOTE_TIMEOUT_MS,
-  });
-  if (!result.ok) return null;
-
-  let branch = null;
-  let head = null;
-  for (const line of result.stdout.split('\n').filter(Boolean)) {
-    const [value, ref] = line.split('\t', 2);
-    const prefix = 'ref: refs/heads/';
-    if (ref === 'HEAD' && value?.startsWith(prefix)) {
-      branch = value.slice(prefix.length);
-    } else if (ref === 'HEAD' && /^[0-9a-f]{40}$/i.test(value ?? '')) {
-      head = value;
+async function annotatePrimaryBranchContainment(cwd, worktrees, branchMap, primaryBranch, options) {
+  // Compare immutable objects, not branch names that may move during a scan.
+  // A stale tracking ref is harmless when the live object is already local.
+  const comparisons = new Map();
+  const inspect = options.inspectContainment ?? inspectDefaultBranchContainment;
+  const compare = async (head) => {
+    if (!comparisons.has(head)) {
+      comparisons.set(head, options.limitDefaultBranchComparison(() => inspect(cwd, head, primaryBranch)));
     }
-  }
-
-  return branch && head ? { branch, head } : null;
-}
-
-async function annotatePrimaryBranchContainment(cwd, worktrees, branchMap, primaryBranch) {
-  const state = primaryBranch.status === 'checked'
-    ? await resolvePrimaryBranchComparison(cwd, primaryBranch)
-    : { comparable: false, localHead: null };
-  const containedBranches = state.comparable
-    ? await listBranchesMergedIntoBase(cwd, primaryBranch.ref)
-    : null;
-
-  for (const branch of branchMap.values()) {
-    branch.defaultBranch = primaryBranch.branch;
-    branch.defaultBranchRef = primaryBranch.ref;
-    branch.defaultBranchHead = primaryBranch.head;
-    branch.defaultBranchStatus = primaryBranch.status;
-    branch.defaultBranchCheckedAt = primaryBranch.checkedAt;
-    branch.defaultBranchContainment = containedBranches instanceof Set
-      ? containedBranches.has(branch.name)
-        ? 'contained'
-        : 'not-contained'
-      : 'unknown';
-  }
-
-  for (const worktree of worktrees) {
-    const branch = worktree.branch ? branchMap.get(worktree.branch) : null;
-    worktree.defaultBranch = primaryBranch.branch;
-    worktree.defaultBranchRef = primaryBranch.ref;
-    worktree.defaultBranchHead = primaryBranch.head;
-    worktree.defaultBranchStatus = primaryBranch.status;
-    worktree.defaultBranchCheckedAt = primaryBranch.checkedAt;
-
-    if (branch) {
-      worktree.defaultBranchContainment = branch.defaultBranchContainment;
-      continue;
-    }
-
-    if (!state.comparable || !worktree.headFull) {
-      worktree.defaultBranchContainment = 'unknown';
-      continue;
-    }
-
-    worktree.defaultBranchContainment = await isAncestor(cwd, worktree.headFull, primaryBranch.ref)
-      ? 'contained'
-      : 'not-contained';
-  }
-}
-
-async function resolvePrimaryBranchComparison(cwd, primaryBranch) {
-  const local = await git(cwd, ['rev-parse', '--verify', '--quiet', primaryBranch.ref]);
-  const localHead = local.ok ? local.stdout.trim() : null;
-
-  return {
-    localHead,
-    comparable: Boolean(localHead && localHead === primaryBranch.head),
+    return comparisons.get(head);
   };
-}
+  const annotate = async (record, head) => {
+    record.defaultBranch = primaryBranch.branch;
+    record.defaultBranchRef = primaryBranch.ref;
+    record.defaultBranchHead = primaryBranch.head;
+    record.defaultBranchStatus = primaryBranch.status;
+    record.defaultBranchCheckedAt = primaryBranch.checkedAt;
+    record.defaultBranchError = primaryBranch.error ?? null;
+    const result = await compare(head);
+    record.defaultBranchContainment = result.containment;
+    record.defaultBranchComparisonError = result.error ?? null;
+  };
 
-async function listBranchesMergedIntoBase(cwd, baseRef) {
-  const result = await git(cwd, [
-    'for-each-ref',
-    `--merged=${baseRef}`,
-    '--format=%(refname:short)',
-    'refs/heads',
+  await Promise.all([
+    ...[...branchMap.values()].map((branch) => annotate(branch, branch.head)),
+    ...worktrees.map((worktree) => annotate(worktree, worktree.headFull)),
   ]);
-  if (!result.ok) return null;
-
-  return new Set(result.stdout.trim().split('\n').filter(Boolean));
 }
 
 function selectIntegrationBaseRef(branchMap) {

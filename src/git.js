@@ -26,6 +26,7 @@ export async function git(cwd, args, options = {}) {
       stdout: error.stdout ?? (options.encoding === 'buffer' ? Buffer.alloc(0) : ''),
       stderr: error.stderr?.toString() ?? error.message,
       status: error.code,
+      timedOut: error.code === 'ETIMEDOUT' || (error.killed === true && Boolean(options.timeoutMs)),
     };
   }
 }

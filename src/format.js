@@ -654,7 +654,7 @@ function formatRepositoryIntegrationEvidence(items, roots, theme, tableWidth) {
 
   return [
     theme.bold('Repository integration evidence'),
-    theme.muted('Primary is the remote default branch. Containment is Git ancestry against its current SHA; ? means the local default ref was not current enough to prove it.'),
+    theme.muted('Primary is the remote default branch. Containment is Git ancestry against its current SHA; ? means live commit ancestry could not be verified. Inspect verification diagnostics.'),
     ...renderTable([
       { key: 'repo', header: 'Repo', minWidth: 14, maxWidth: 36 },
       { key: 'integration', header: 'Integration base', minWidth: 14, maxWidth: 28 },

@@ -11,6 +11,7 @@ import {
   getToolProvenance,
 } from './provenance.js';
 import { formatRetireText, retireWorktree } from './retire.js';
+import { formatVerificationText, verifyRepository } from './verify.js';
 
 const DEFAULT_INTERVAL_SECONDS = 15;
 
@@ -24,6 +25,15 @@ export async function runCli(argv) {
 
   if (options.version) {
     console.log(formatToolProvenance(getToolProvenance()));
+    return;
+  }
+
+  if (command === 'verify') {
+    const report = attachToolProvenance(await verifyRepository(roots[0]));
+    if (options.json) console.log(JSON.stringify(report, null, 2));
+    else console.log(withToolProvenance(formatVerificationText(report), report));
+    // An unavailable remote is evidence in a valid report, not a malformed
+    // report. Clients must inspect status/containment, never the exit code alone.
     return;
   }
 
@@ -331,6 +341,11 @@ function parseArgs(argv) {
     throw new Error('retire requires exactly one explicit worktree path.');
   }
 
+  if (command === 'verify' && !options.help && !options.version) {
+    if (roots.length !== 1) throw new Error('verify requires exactly one explicit repository path.');
+    if (!options.liveRemoteCheck) throw new Error('verify requires live remote evidence; --no-live-remote-check is not valid.');
+  }
+
   if (!['reclaim', 'session-complete', 'disk-pressure', 'retire'].includes(command) && (options.reclaimOptionUsed || options.diskPressureOptionUsed)) {
     throw new Error('--tool, --apply, --yes, --full-clean, --exclude-primary, --worktrees-only, --min-age-minutes, --workflow-root, --workflow-ref, and --min-free-gb are only valid with reclaim, retire, or disk-pressure.');
   }
@@ -451,6 +466,7 @@ function printHelp() {
 
 Usage:
   git-groundskeeper scan [roots...] [options]
+  git-groundskeeper verify <repository> [--json]
   git-groundskeeper status [roots...] [options]
   git-groundskeeper watch [roots...] [options]
   git-groundskeeper reclaim [roots...] [options]
@@ -458,6 +474,13 @@ Usage:
   git-groundskeeper disk-pressure [roots...] [options]
   git-groundskeeper retire <worktree> [options]
   git-groundskeeper --version
+
+Verification:
+  verify checks the live origin default branch and each registered worktree's
+  exact commit without fetching, changing refs, scanning files, or checking PRs.
+  It reports the live SHA, check time, containment, and safe failure reasons.
+  Missing remote objects or incomplete history remain unknown. It never grants
+  cleanup permission and requires exactly one explicit repository path.
 
 Roots default to your home directory, so a bare scan discovers every
 repository on the machine with no prior knowledge of its layout. Pass roots

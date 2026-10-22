@@ -1759,6 +1759,48 @@ test('scanRoots tags repo ownership from its remote', async () => {
   assert.equal(repo.ownership, 'mine');
 });
 
+test('default-branch comparisons share one bounded pool and reuse exact-head promises across records', async () => {
+  const fixtures = [createFixture(), createFixture()];
+  const heads = new Map();
+  for (const fixture of fixtures) {
+    heads.set(fixture.repo, git(fixture.repo, ['rev-parse', 'HEAD']).trim());
+    git(fixture.repo, ['worktree', 'add', '-b', 'linked', path.join(fixture.parent, 'linked')]);
+    for (let index = 0; index < 5; index += 1) {
+      git(fixture.repo, ['commit', '--allow-empty', '-m', `branch ${index}`]);
+      git(fixture.repo, ['branch', `feature-${index}`]);
+    }
+  }
+  let releasePrimaries;
+  const primariesReady = new Promise((resolve) => { releasePrimaries = resolve; });
+  let primaryCount = 0;
+  let active = 0;
+  let maximum = 0;
+  const calls = new Map();
+  const report = await scanRoots(fixtures.map((fixture) => fixture.repo), {
+    maxDepth: 1, buckets: true, prCheck: false, concurrency: 8,
+    inspectPrimaryBranch: async (cwd) => {
+      if (++primaryCount === fixtures.length) releasePrimaries();
+      await primariesReady;
+      return { branch: 'main', head: heads.get(cwd) };
+    },
+    inspectContainment: async (cwd, head) => {
+      const key = `${cwd}\0${head}`;
+      calls.set(key, (calls.get(key) ?? 0) + 1);
+      maximum = Math.max(maximum, ++active);
+      await new Promise((resolve) => setImmediate(resolve));
+      active -= 1;
+      return { containment: 'contained', error: null };
+    },
+  });
+  assert.equal(maximum, 4, 'independent repositories must share the same four comparison slots');
+  assert.ok([...calls.values()].every((count) => count === 1), 'branches and worktrees with the same exact head share one comparison');
+  const expected = report.repos.reduce((count, repo) => count + new Set([
+    ...repo.branches.map((branch) => branch.head), ...repo.worktrees.map((worktree) => worktree.headFull),
+  ]).size, 0);
+  assert.equal(calls.size, expected);
+  assert.ok(report.repos.every((repo) => repo.worktrees.every((worktree) => worktree.defaultBranchContainment === 'contained')));
+});
+
 function createFixture() {
   const parent = makeTemporaryDirectory('git-groundskeeper-');
   const repo = path.join(parent, 'repo');

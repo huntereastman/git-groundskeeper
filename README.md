@@ -15,6 +15,22 @@
 It is intentionally a CLI first. The JSON output is meant to power a future
 desktop or menubar app.
 
+Use `git-groundskeeper verify /absolute/path/to/repository --json` to recheck
+the live `origin` default branch for one repository and its registered
+worktrees. This skips discovery, size scans, ignored-file scans, and GitHub PR
+queries. It compares captured full commit IDs against the immutable live
+default-branch commit, even when a local tracking ref is stale but that object
+is already available. It never fetches or changes references. Missing objects,
+incomplete history, and failed Git commands remain unknown; they never become
+proof that a branch is merged or unmerged.
+
+Verification reports include the default branch, exact remote commit, check
+time, and fixed, credential-free diagnostic codes for unavailable evidence.
+Transient network or timeout failures get at most one retry. These facts are
+also included in bucket scans. A verification report describes commit history;
+it does not replace retirement's content, ownership, activity, and approval
+checks.
+
 The default text output is scoped to the folder you pass in. It renders one
 summary table per worktree inside that folder, then separates repository-level
 branch and stash cleanup. Use `--details` when you want the full linked-worktree
