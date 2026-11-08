@@ -101,6 +101,12 @@ Project managers should call the read-only form before marking a session
 complete. They may call the apply form only within an existing cleanup approval
 envelope. Worktree removal remains a separate Groundskeeper scan/review action.
 
+The optional [shared storage accountant](./WORKSPACE_STORAGE_ACCOUNTING.md)
+records per-task baselines and includes Xcode's external user-level DerivedData
+in the closeout inventory. Its Codex adapter permits one corrective pass for
+registered output that grows by at least 1 GiB without a cleanup or retention
+receipt. It never deletes files or replaces provider-specific safety proof.
+
 ### Abandoned sessions
 
 An abandoned session is not automatically disposable. Mark it inactive, check

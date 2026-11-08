@@ -3,3 +3,4 @@ coverage/
 .DS_Store
 *.log
 /build-provenance.json
+tools/__pycache__/

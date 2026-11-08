@@ -12,6 +12,10 @@
 - nested repositories
 - linked worktrees outside the scanned folder
 
+For agent task baselines, external Xcode output attribution and bounded Codex
+closeout checks, see [Shared agent storage accounting](docs/WORKSPACE_STORAGE_ACCOUNTING.md).
+The helper is read-only and uses the existing reclaim safety boundaries.
+
 It is intentionally a CLI first. The JSON output is meant to power a future
 desktop or menubar app.
 
