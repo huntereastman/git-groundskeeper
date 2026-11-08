@@ -406,6 +406,7 @@ async function inspectRunnerCacheTarget(runnerRoot, relativePath, options) {
   const sharedReferences = blockedReasons.length === 0
     ? await inspectIncomingSymlinks(absolutePath, { ...options, ...referenceScope }) : null;
   if (sharedReferences) blockedReasons.push(...sharedReferenceBlockers(sharedReferences));
+  if (sharedReferences) referenceScope.referenceRoots = sharedReferences.referenceRoots;
   return {
     exists: true,
     relativePath,

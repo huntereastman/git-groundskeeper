@@ -889,6 +889,9 @@ async function inspectTarget(projectRoot, gitRoot, relativePath, options) {
   const sharedReferences = blockedReasons.length === 0
     ? await inspectIncomingSymlinks(absolutePath, { ...options, ...referenceScope }) : null;
   if (sharedReferences) blockedReasons.push(...sharedReferenceBlockers(sharedReferences));
+  // Persist absolute original and canonical scopes in saved receipts. Applying
+  // from another cwd, or through a retargeted alias, must not narrow the plan.
+  if (sharedReferences) referenceScope.referenceRoots = sharedReferences.referenceRoots;
 
   return {
     exists: true,

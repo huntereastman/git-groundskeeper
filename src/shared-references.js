@@ -17,6 +17,7 @@ export async function inspectIncomingSymlinks(targetPath, options = {}) {
   const inspectedLinks = new Set();
   const visitedDirectories = new Set();
   const pendingRoots = [];
+  const referenceRoots = new Set();
   const started = Date.now();
   const timeoutMs = options.referenceTimeoutMs ?? TIMEOUT_MS;
   const maxEntries = options.referenceMaxEntries ?? MAX_ENTRIES;
@@ -37,9 +38,10 @@ export async function inspectIncomingSymlinks(targetPath, options = {}) {
     }
   }
 
-  async function addRoot(input, { registered = false } = {}) {
+  async function addRoot(input, { registered = false, explicit = false } = {}) {
     budget();
     const absolute = path.resolve(input);
+    if (explicit) referenceRoots.add(absolute);
     let stat;
     try {
       stat = await fs.promises.lstat(absolute);
@@ -51,6 +53,7 @@ export async function inspectIncomingSymlinks(targetPath, options = {}) {
     }
     if (stat.isSymbolicLink()) await inspectLink(absolute);
     const canonical = await fs.promises.realpath(absolute);
+    if (explicit) referenceRoots.add(canonical);
     const resolvedStat = stat.isSymbolicLink() ? await fs.promises.stat(absolute) : stat;
     if (!resolvedStat.isDirectory()) throw new Error(`reference root is not a directory: ${absolute}`);
     if (!roots.has(canonical)) {
@@ -93,6 +96,7 @@ export async function inspectIncomingSymlinks(targetPath, options = {}) {
       complete,
       target: target ?? path.resolve(targetPath),
       roots: [...roots].sort(),
+      referenceRoots: [...referenceRoots].sort(),
       references,
       errors,
       inspectedEntries,
@@ -102,16 +106,16 @@ export async function inspectIncomingSymlinks(targetPath, options = {}) {
   try {
     target = await fs.promises.realpath(targetPath);
     const gitRoots = [...new Set(options.gitRoots ?? [])];
-    const referenceRoots = [...new Set(options.referenceRoots ?? [])];
-    if (gitRoots.length === 0 && referenceRoots.length === 0) {
+    const suppliedRoots = [...new Set(options.referenceRoots ?? [])];
+    if (gitRoots.length === 0 && suppliedRoots.length === 0) {
       throw new Error('no reference inspection scope is available');
     }
     for (const root of gitRoots) {
       await addRoot(root);
       await addPeers(root, true);
     }
-    for (const root of referenceRoots) {
-      await addRoot(root);
+    for (const root of suppliedRoots) {
+      await addRoot(root, { explicit: true });
       await addPeers(root);
     }
 

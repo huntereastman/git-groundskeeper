@@ -114,6 +114,29 @@ test('apply preserves additional reference scope from the saved plan', async (t)
   assert.equal(fs.existsSync(path.join(link, 'keep.txt')), true);
 });
 
+test('saved relative reference scope stays bound when apply runs from another cwd', async (t) => {
+  const f = fixture(t);
+  const cwd = process.cwd();
+  const kept = path.join(f.parent, 'kept');
+  const elsewhere = path.join(f.parent, 'elsewhere');
+  fs.mkdirSync(kept);
+  fs.mkdirSync(path.join(elsewhere, 'kept'), { recursive: true });
+  try {
+    process.chdir(f.parent);
+    const plan = await scanReclaimRoots([f.project], { ...options, referenceRoots: ['kept'] });
+    assert.equal(plan.summary.candidateCount, 1);
+    assert.ok(plan.projects[0].targets[0].referenceScope.referenceRoots.includes(kept));
+    fs.symlinkSync(f.target, path.join(kept, 'shared-dependencies'));
+    process.chdir(elsewhere);
+    const result = await applyReclaimReport(plan, { ...options, yes: true, explicitRoots: true });
+    assert.equal(result.summary.blockedCount, 1);
+    assert.match(result.projects[0].blockedReasons.join('\n'), /shared symlink target/);
+    assert.equal(fs.existsSync(f.target), true);
+  } finally {
+    process.chdir(cwd);
+  }
+});
+
 test('an alias introduced after provider revalidation is blocked before unlink', async (t) => {
   const f = fixture(t);
   const plan = await scanReclaimRoots([f.project], options);
