@@ -1,0 +1,60 @@
+{
+  "qualified_at": "2026-11-08T01:20:34.014633+00:00",
+  "source_change_commit": "4b0c57fc027e7af573fed1064e04b5b9cd23168d",
+  "source_base": "6e689f9054e755f3456bdfdf20a1915964e0e7a3",
+  "source_files_sha256": {
+    "tools/install_workspace_storage.py": "4ebf9e47d4d4578799de858b331242b9542df30d418d98348859990948e428ce",
+    "tools/test_workspace_storage.py": "1b43ad98f5048d75659a8cc77ea6eb968cc0823a832a2a10eaef89a53210e4db",
+    "tools/workspace_storage.py": "b9f876b5da3947a660806b0ee736a635181d947678ff9baa1c07e241eb034cd3"
+  },
+  "validation": {
+    "storage_tests": {
+      "passed": 32,
+      "failed": 0
+    },
+    "existing_delivery_guard_tests": {
+      "passed": 47,
+      "failed": 0
+    },
+    "groundskeeper_tests": {
+      "passed": 207,
+      "failed": 0
+    },
+    "whitespace_check": "passed"
+  },
+  "native_runtime_qualification": {
+    "realModelCalls": 0,
+    "loopbackFixtureRequests": 3,
+    "backendCallBlocked": true,
+    "backendMarkerExists": false,
+    "turnStatus": "completed",
+    "errors": [],
+    "storagePolicyDelivered": true,
+    "storageCloseoutDelivered": true,
+    "realFixtureBytes": 2097152,
+    "fixtureGrowthLimitMiB": 1
+  },
+  "live_xcode_attribution": {
+    "workspace_relative_name": "account-free-ai/ai-bible",
+    "external_bytes": 7906648064,
+    "external_workspace_mapping_verified": true,
+    "deletion_eligibility_established": false
+  },
+  "installation": {
+    "helper_sha256": "b9f876b5da3947a660806b0ee736a635181d947678ff9baa1c07e241eb034cd3",
+    "existing_guard_sha256": "7252f2571942b2e2329a2157a6ed2514f0300bf915d6c197338cdb2b6d0c86f3",
+    "hook_definitions_changed": false,
+    "hook_trust_changed": false,
+    "project_output_automatically_deleted": false,
+    "claude_instructions_updated": true,
+    "claude_native_hook_installed": false
+  },
+  "coverage_limits": [
+    "Registered Codex task workspaces; registration is required by shared instructions.",
+    "One corrective pass per turn rather than an unbounded continuation.",
+    "No generic automatic deletion; source, secrets, history, active output and required evidence remain protected.",
+    "Existing Groundskeeper providers still do not apply external Xcode cleanup.",
+    "Fresh native runtime qualified; all previously open desktop chats hot-reloading hooks is not established.",
+    "CI jobs outside Codex hooks are not intercepted by this helper."
+  ]
+}
