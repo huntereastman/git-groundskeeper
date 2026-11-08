@@ -81,6 +81,43 @@ jobs:
   assert.match(drift.unresolved[0], /not an explicit version/);
 });
 
+test('runner cache refuses a superseded SDK shared by a registered workflow peer', async (t) => {
+  const fixture = createRunnerFixture(t);
+  const peer = path.join(path.dirname(fixture.workflows), 'outside-workflow-peer');
+  git(fixture.workflows, ['worktree', 'add', '-b', 'peer', peer]);
+  fs.mkdirSync(path.join(peer, '.fvm'));
+  const link = path.join(peer, '.fvm', 'flutter_sdk');
+  fs.symlinkSync(fixture.oldCache, link);
+  const report = await scanReclaimRoots([fixture.runner], runnerOptions(fixture, {
+    apply: true, yes: true,
+  }));
+  const old = report.projects.find((project) => project.cacheVersion === '3.44.2');
+  assert.equal(old.status, 'blocked');
+  assert.match(old.blockedReasons.join('\n'), /shared symlink target/);
+  assert.equal(old.targets[0].sharedReferences.references[0].path, link);
+  assert.equal(fs.existsSync(path.join(link, 'sdk.bin')), true);
+});
+
+test('runner deletion boundary catches an alias added after target revalidation', async (t) => {
+  const fixture = createRunnerFixture(t);
+  const plan = await scanReclaimRoots([fixture.runner], runnerOptions(fixture));
+  assert.equal(plan.summary.candidateCount, 1);
+  const link = path.join(fixture.workflows, 'new-sdk-alias');
+  const result = await applyReclaimReport(plan, runnerOptions(fixture, {
+    yes: true,
+    runnerProcessProbe: async () => {
+      fs.symlinkSync(fixture.oldCache, link);
+      return { ok: true, active: false, processes: [], error: null };
+    },
+    removeTarget: async () => assert.fail('shared SDK reached the unlink adapter'),
+  }));
+  const old = result.projects.find((project) => project.cacheVersion === '3.44.2');
+  assert.equal(old.status, 'blocked');
+  assert.equal(old.verifiedTargetBytesRemoved, 0);
+  assert.match(old.blockedReasons.join('\n'), /shared symlink target/);
+  assert.equal(fs.existsSync(path.join(link, 'sdk.bin')), true);
+});
+
 function createRunnerFixture(t, options = {}) {
   const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'groundskeeper-runner-cache-')));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));

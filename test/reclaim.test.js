@@ -476,6 +476,23 @@ function safeOptions(overrides = {}) {
   };
 }
 
+test('Flutter full-clean never starts when a peer references any clean target', async (t) => {
+  const fixture = createFlutterFixture(t);
+  const peer = path.join(fixture.parent, 'peer');
+  git(fixture.repo, ['worktree', 'add', '-b', 'peer', peer]);
+  fs.mkdirSync(path.join(fixture.repo, '.dart_tool'));
+  fs.writeFileSync(path.join(fixture.repo, '.dart_tool', 'state'), 'keep\n');
+  fs.symlinkSync(path.join(fixture.repo, '.dart_tool'), path.join(peer, '.dart_tool'));
+  const report = await scanReclaimRoots([fixture.repo], safeOptions({
+    fullClean: true, apply: true, yes: true, explicitRoots: true,
+    flutterCleanRunner: async () => assert.fail('shared full-clean reached Flutter'),
+  }));
+  assert.equal(report.summary.blockedCount, 1);
+  assert.match(report.projects[0].blockedReasons.join('\n'), /shared symlink target/);
+  assert.equal(fs.existsSync(path.join(fixture.repo, 'build', 'artifact.bin')), true);
+  assert.equal(fs.readFileSync(path.join(peer, '.dart_tool', 'state'), 'utf8'), 'keep\n');
+});
+
 function createFlutterFixture(t, options = {}) {
   const parent = makeTemporaryDirectory(t);
   const repo = createFlutterRepo(path.join(parent, options.name ?? 'app'), options);

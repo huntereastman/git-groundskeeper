@@ -1,6 +1,6 @@
 {
   "name": "git-groundskeeper",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Scan local Git forests for dirty worktrees, unpushed branches, stashes, and cleanup risks.",
   "type": "module",
   "bin": {

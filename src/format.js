@@ -991,8 +991,9 @@ function orphanColumns() {
   ];
 }
 
-// `worktree remove` never forces: a refusal there means real uncommitted work,
-// which is a second opinion worth deferring to.
+// Generated checkout commands go through guarded retirement, including fresh
+// incoming-reference inspection. Never emit a direct Git removal that bypasses
+// the safety checks used by the CLI's own deletion paths.
 //
 // `branch -d` is not an integration-base check. When a branch has a configured
 // upstream, Git may authorize deletion merely because the tip is contained by
@@ -1026,7 +1027,7 @@ function attachedWorktreeRemoveCommand(repoPath, worktree, branch) {
     `grep -Fqx -- ${shellQuote(worktree.branch)}`,
   ].join(' | ');
   const headCheck = `test "$(git -C ${shellQuote(worktree.path)} rev-parse --verify HEAD)" = ${shellQuote(expectedHead)}`;
-  const remove = `git -C ${shellQuote(repoPath)} worktree remove ${shellQuote(worktree.path)}`;
+  const remove = `git-groundskeeper retire ${shellQuote(worktree.path)} --retain-branch --apply --yes`;
   return `${branchCheck} && ${headCheck} && ${remove}`;
 }
 
@@ -1067,7 +1068,7 @@ function detachedWorktreeRemoveCommand(repoPath, worktree) {
     `|| test "$(git -C ${shellQuote(repoPath)} rev-parse --verify ${shellQuote(safetyRef)})" = ${shellQuote(expectedHead)})`,
   ].join(' ');
 
-  return `${headCheck} && ${retentionCheck} && ${createSafetyRef} && ${headCheck} && git -C ${shellQuote(repoPath)} worktree remove ${shellQuote(worktree.path)}`;
+  return `${headCheck} && ${retentionCheck} && ${createSafetyRef} && ${headCheck} && git-groundskeeper retire ${shellQuote(worktree.path)} --retain-branch --apply --yes`;
 }
 
 function detachedSafetyRef(worktree) {

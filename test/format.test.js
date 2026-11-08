@@ -283,7 +283,7 @@ test('a merged PR with commits outside the base is not in the safe branch-deleti
 
   assert.doesNotMatch(text, /ready if unused: remove checkout \+ branch/);
   assert.match(text, /review: remove checkout, retain local branch history \(1\)/);
-  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
+  assert.ok(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/done-worktree'")));
   assert.equal(commands.some((line) => line.includes("branch -D 'feature/done'")), false);
   assert.equal(commands.some((line) => line.includes("branch -d 'feature/done'")), false);
 });
@@ -298,14 +298,14 @@ test('a worktree holding unique files is not swept along by the safe bucket', ()
   worktrees[2].preciousIgnored = ['assets/.env'];
 
   const text = formatScanText(report, { buckets: true, commands: true, all: true });
-  const commands = text.split('\n').filter((line) => line.includes('worktree remove'));
+  const commands = text.split('\n').filter((line) => line.includes('git-groundskeeper retire'));
 
   // The Keeps warning lived only in the table, so piping the safe bucket's
   // commands deleted the file it warned about. A bucket is an action group:
   // needing a look first makes this a different action, not a footnote.
   assert.match(text, /check first: ignored content here \(1\)/);
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")), false);
-  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")));
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/done-worktree'")), false);
+  assert.ok(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/app-admin'")));
 });
 
 test('ignored content is named as review work and counted as items', () => {
@@ -419,8 +419,8 @@ test('aliased worktree paths are blocked and receive no cleanup commands', () =>
 
   assert.match(text, /blocked: aliased worktree metadata \(2\)/);
   assert.match(text, /multiple paths share one Git worktree/);
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")), false);
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app-admin-copy'")), false);
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/app-admin'")), false);
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/app-admin-copy'")), false);
 });
 
 test('command scopes follow the emitted action, not the scanner tier', () => {
@@ -454,18 +454,18 @@ test('command scopes follow the emitted action, not the scanner tier', () => {
   const scoped = formatScanText(report, { commands: true, commandsTier: 'worktree-and-branch', buckets: true, all: true });
   const commands = scoped.split('\n').filter((line) => line.startsWith('git '));
 
-  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
+  assert.ok(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/done-worktree'")));
   assert.ok(commands.some((line) => line.includes("merge-base --is-ancestor 'refs/heads/feature/done' 'origin/main'")));
   assert.ok(commands.some((line) => line.includes("update-ref -d 'refs/heads/feature/done' '987fedc987fedc987fedc987fedc987fedc987f0'")));
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app-admin'")), false);
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/retained-source-branch'")), false);
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/app-admin'")), false);
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/retained-source-branch'")), false);
 
   const checkoutOnly = formatScanText(report, { commands: true, commandsTier: 'worktree-only', buckets: true, all: true });
   const checkoutCommands = checkoutOnly.split('\n').filter((line) => line.startsWith('git '));
 
-  assert.ok(checkoutCommands.some((line) => line.includes("worktree remove '/workspace/retained-source-branch'")));
+  assert.ok(checkoutCommands.some((line) => line.includes("git-groundskeeper retire '/workspace/retained-source-branch'")));
   assert.equal(checkoutCommands.some((line) => line.includes("update-ref -d 'refs/heads/feature/retained-source-branch'")), false);
-  assert.equal(checkoutCommands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")), false);
+  assert.equal(checkoutCommands.some((line) => line.includes("git-groundskeeper retire '/workspace/done-worktree'")), false);
 });
 
 test('branch removal rechecks an explicit base and refuses a moved branch OID', () => {
@@ -486,7 +486,7 @@ test('branch removal rechecks an explicit base and refuses a moved branch OID', 
 
   const commands = text.split('\n').filter((line) => line.startsWith('git '));
 
-  assert.ok(commands.some((line) => line.includes("worktree remove '/workspace/done-worktree'")));
+  assert.ok(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/done-worktree'")));
   // Paths with spaces must survive being pasted into a shell. The command now
   // starts by checking the linked checkout's branch, then removes via primary.
   assert.ok(commands.every((line) => line.includes("git -C '/workspace/4 Pillars/app'")));
@@ -495,21 +495,21 @@ test('branch removal rechecks an explicit base and refuses a moved branch OID', 
   // deletion to the full OID observed by the scan so a moved branch is refused.
   const branchCommand = commands.find((line) => line.includes("update-ref -d 'refs/heads/feature/done'"));
   assert.ok(branchCommand);
-  assert.match(branchCommand, /worktree remove '\/workspace\/done-worktree' && git -C/);
+  assert.match(branchCommand, /git-groundskeeper retire '\/workspace\/done-worktree' --retain-branch --apply --yes && git -C/);
   assert.match(branchCommand, /merge-base --is-ancestor 'refs\/heads\/feature\/done' 'origin\/main'/);
   assert.match(branchCommand, /update-ref -d 'refs\/heads\/feature\/done' '987fedc987fedc987fedc987fedc987fedc987f0'/);
   assert.doesNotMatch(branchCommand, /branch -[dD]/);
-  // worktree remove never forces: a refusal there means real uncommitted work.
-  assert.equal(commands.some((line) => line.includes('worktree remove') && line.includes('--force')), false);
+  // git-groundskeeper retire never forces: a refusal there means real uncommitted work.
+  assert.equal(commands.some((line) => line.includes('git-groundskeeper retire') && line.includes('--force')), false);
   // Nothing is proposed for the bucket that would lose work.
-  assert.equal(commands.some((line) => line.includes("worktree remove '/workspace/app'")), false);
+  assert.equal(commands.some((line) => line.includes("git-groundskeeper retire '/workspace/app'")), false);
 
   // A legacy/incomplete report cannot supply either expected-old guard. The
   // checkout now remains in place rather than relying on stale partial data.
   done.head = '987fedc';
   const incomplete = formatScanText(report, { commands: true, buckets: true, all: true });
   assert.match(incomplete, /retained checkout \/workspace\/done-worktree: exact branch or full HEAD guard unavailable/);
-  assert.doesNotMatch(incomplete, /worktree remove '\/workspace\/done-worktree'/);
+  assert.doesNotMatch(incomplete, /git-groundskeeper retire '\/workspace\/done-worktree'/);
   assert.doesNotMatch(incomplete, /update-ref -d 'refs\/heads\/feature\/done'/);
 });
 
@@ -527,6 +527,7 @@ test('generated branch retirement command refuses stale-upstream and moved-tip r
 
   const refusedByBase = spawnSync('/bin/sh', ['-c', upstreamCommand], {
     encoding: 'utf8',
+    env: commandEnvironment(upstreamFixture),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   assert.notEqual(refusedByBase.status, 0);
@@ -593,6 +594,26 @@ test('generated branch retirement command refuses stale-upstream and moved-tip r
   );
 });
 
+test('generated checkout commands enforce shared-target refusal and retain the branch', (t) => {
+  const fixture = createCommandFixture(t);
+  const branch = 'feature/shared-source';
+  gitCommand(fixture.repo, ['worktree', 'add', '-b', branch, fixture.linked, 'main']);
+  gitCommand(fixture.linked, ['push', '-u', 'origin', branch]);
+  const head = gitCommand(fixture.linked, ['rev-parse', 'HEAD']);
+  const link = path.join(fixture.repo, 'saved-release-source');
+  fs.symlinkSync(path.join(fixture.linked, 'README.md'), link);
+  const command = extractBranchRetirementCommand(createGuardedBranchReport(fixture, branch, head), branch);
+  assert.match(command, /git-groundskeeper retire .* --retain-branch --apply --yes/);
+  assert.doesNotMatch(command, /git -C .* worktree remove/);
+  const result = spawnSync('/bin/sh', ['-c', command], {
+    encoding: 'utf8', env: commandEnvironment(fixture), timeout: 30_000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /shared symlink target/);
+  assert.equal(fs.readFileSync(link, 'utf8'), '# fixture\n');
+  assert.equal(gitCommand(fixture.repo, ['rev-parse', `refs/heads/${branch}`]), head);
+});
+
 test('detached cleanup commands recheck exact HEAD and current local retention', () => {
   const report = createReport();
   const [repo] = report.repos;
@@ -608,7 +629,7 @@ test('detached cleanup commands recheck exact HEAD and current local retention',
   });
   const command = output
     .split('\n')
-    .find((line) => line.startsWith('test ') && line.includes("worktree remove '/workspace/app-admin'"));
+    .find((line) => line.startsWith('test ') && line.includes("git-groundskeeper retire '/workspace/app-admin'"));
   assert.ok(command);
   assert.match(command, /rev-parse --verify HEAD\)" = 'dddddddddddddddddddddddddddddddddddddddd'/);
   assert.match(command, /merge-base --is-ancestor 'dddddddddddddddddddddddddddddddddddddddd' 'refs\/heads\/main'/);
@@ -617,7 +638,7 @@ test('detached cleanup commands recheck exact HEAD and current local retention',
     /update-ref 'refs\/heads\/git-groundskeeper\/retained-detached\/dddddddddddddddddddddddddddddddddddddddd' 'dddddddddddddddddddddddddddddddddddddddd' '0000000000000000000000000000000000000000'/,
   );
   assert.match(output, /creates safety branch git-groundskeeper\/retained-detached\/dddddddddddddddddddddddddddddddddddddddd/);
-  assert.ok(command.indexOf('merge-base --is-ancestor') < command.indexOf('worktree remove'));
+  assert.ok(command.indexOf('merge-base --is-ancestor') < command.indexOf('git-groundskeeper retire'));
   assert.ok(command.indexOf('update-ref') < command.lastIndexOf('rev-parse --verify HEAD'));
 
   repo.worktrees[1].retentionSource = 'local-tag';
@@ -636,7 +657,7 @@ test('detached cleanup commands recheck exact HEAD and current local retention',
     commandsTier: 'worktree-only',
   });
   assert.match(incomplete, /retained detached checkout \/workspace\/app-admin: exact HEAD or current retention guard unavailable/);
-  assert.doesNotMatch(incomplete, /worktree remove '\/workspace\/app-admin'/);
+  assert.doesNotMatch(incomplete, /git-groundskeeper retire '\/workspace\/app-admin'/);
 });
 
 test('buckets list the worktrees in each tier, not just a count', () => {
@@ -883,7 +904,7 @@ test('checkout review separates integration state and differently named upstream
   assert.match(text, /\| integrated-base-tracker\s+\| feature\/integrated-base-tracker\s+\| origin\/main\s+\| -\s+\| clean\s+\| push \+7, behind 97\s+\| 7\s+\|/);
   assert.match(text, /\| unmerged-checkout\s+\| feature\/unmerged[\s\S]*?\| 4\s+\|/);
 
-  const removals = text.split('\n').filter((line) => line.includes('worktree remove'));
+  const removals = text.split('\n').filter((line) => line.includes('git-groundskeeper retire'));
   assert.equal(removals.length, 8);
   assert.equal(new Set(removals).size, 8);
 });
@@ -937,8 +958,8 @@ test('bucket rows and cleanup commands never target linked worktrees outside the
 
   assert.match(text, /Linked worktrees outside roots hidden:/);
   assert.doesNotMatch(text, /escape-worktree|feature\/outside-escape|outside-orphan|outside stash/);
-  assert.doesNotMatch(text, /git -C '\/outside|worktree remove '\/outside/);
-  assert.match(text, /worktree remove '\/workspace\/done-worktree'/);
+  assert.doesNotMatch(text, /git -C '\/outside|git-groundskeeper retire '\/outside/);
+  assert.match(text, /git-groundskeeper retire '\/workspace\/done-worktree'/);
 });
 
 test('bucket mode renders a clean removal candidate instead of the ordinary empty state', () => {
@@ -948,7 +969,7 @@ test('bucket mode renders a clean removal candidate instead of the ordinary empt
 
   assert.match(text, /In scope: 1 worktree, 0 need attention/);
   assert.match(text, /ready if unused: remove checkout, retain branch \(1\)/);
-  assert.match(text, /worktree remove '\/workspace\/clean-candidate'/);
+  assert.match(text, /git-groundskeeper retire '\/workspace\/clean-candidate'/);
   assert.doesNotMatch(text, /No outstanding Git state found/);
   assert.doesNotMatch(text, /Clean worktrees hidden/);
 });
@@ -1021,7 +1042,7 @@ test('a differently named upstream cannot remain in the safe worktree-and-branch
 
   assert.match(text, /review: remove checkout, retain branch; upstream name differs \(1\)/);
   assert.doesNotMatch(text, /ready if unused: remove checkout \+ branch/);
-  assert.match(text, /worktree remove '\/workspace\/done-worktree'/);
+  assert.match(text, /git-groundskeeper retire '\/workspace\/done-worktree'/);
   assert.doesNotMatch(text, /update-ref -d 'refs\/heads\/feature\/done'/);
 });
 
@@ -1150,8 +1171,8 @@ test('root scoping compares filesystem identity so symlinked roots stay in scope
   assert.match(text, /In scope: 1 worktree/);
   assert.match(text, /\| clean-candidate\s+\|/);
   assert.doesNotMatch(text, /outside-candidate/);
-  assert.match(text, new RegExp(`worktree remove '${escapeRegExp(candidatePath)}'`));
-  assert.doesNotMatch(text, new RegExp(`worktree remove '${escapeRegExp(siblingPath)}'`));
+  assert.match(text, new RegExp(`git-groundskeeper retire '${escapeRegExp(candidatePath)}'`));
+  assert.doesNotMatch(text, new RegExp(`git-groundskeeper retire '${escapeRegExp(siblingPath)}'`));
 });
 
 function createReport() {
@@ -1375,6 +1396,16 @@ function createCommandFixture(t) {
   gitCommand(repo, ['push', '-u', 'origin', 'main']);
 
   return { parent, repo, remote, linked };
+}
+
+function commandEnvironment(fixture) {
+  const directory = path.join(fixture.parent, 'bin');
+  fs.mkdirSync(directory, { recursive: true });
+  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  fs.writeFileSync(path.join(directory, 'git-groundskeeper'),
+    `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(path.resolve('bin/git-groundskeeper.js'))} \"$@\"\n`,
+    { mode: 0o755 });
+  return { ...process.env, PATH: `${directory}${path.delimiter}${process.env.PATH}` };
 }
 
 function createGuardedBranchReport(fixture, branchName, head) {

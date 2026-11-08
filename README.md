@@ -167,6 +167,28 @@ backup if losing this computer would be unacceptable.
 
 ## Reclaim Flutter build output
 
+Every deletion entry point (`reclaim`, `session-complete`, `disk-pressure`,
+runner cache cleanup, and `retire`) refuses shared symlink targets. The guard
+inspects all registered peer worktrees, including peers outside the cleanup
+root, and the supplied roots and their discovered repositories. It includes
+ignored directories and retained build/release output inside that scope.
+Absolute, relative, chained, descendant, and parent-directory aliases protect
+the target. Links inside the target being removed do not survive deletion and
+do not establish sharing.
+
+The guard runs during planning, apply revalidation, and again at the deletion
+boundary (before invoking Flutter for full-clean). JSON receipts include the
+reference scope and actual incoming links; text explains the refusal. An
+unreadable directory, unresolved link loop, failed Git enumeration, or bounded
+inspection limit blocks deletion. There is no force/bypass flag. The inspection
+is bounded to 500,000 entries and 30 seconds per target. It does not claim to
+find aliases in arbitrary unregistered folders outside the supplied roots, or
+intercept direct filesystem/Git commands run outside Groundskeeper. As with
+the process check, callers must keep concurrent writers inactive during cleanup.
+Generated checkout-removal commands also invoke guarded `retire`; they retain
+the scan's branch/HEAD and branch-deletion checks without emitting direct Git
+worktree removal.
+
 `reclaim` inventories proven Flutter-generated output and is read-only by
 default. It requires a Flutter SDK dependency in `pubspec.yaml`, ignored and
 untracked targets, paths contained inside the project without symlink

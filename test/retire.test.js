@@ -10,6 +10,37 @@ import { scanRoots } from '../src/scanner.js';
 const binPath = path.resolve('bin/git-groundskeeper.js');
 const noProcesses = async () => ({ ok: true, active: false, processes: [], error: null });
 
+test('retire refuses a worktree containing the target of a surviving peer symlink', async (t) => {
+  const fixture = createFixture(t);
+  const link = path.join(fixture.repo, 'retained-source');
+  fs.symlinkSync(path.join(fixture.linked, 'README.md'), link);
+  const report = await retireWorktree(fixture.linked, {
+    apply: true, yes: true, retainBranch: true, inspectProcesses: noProcesses,
+  });
+  assert.equal(report.status, 'blocked');
+  assert.match(report.blockedReasons.join('\n'), /shared symlink target/);
+  assert.equal(report.sharedReferences.references[0].path, link);
+  assert.equal(fs.readFileSync(link, 'utf8'), '# fixture\n');
+  assert.equal(git(fixture.repo, ['rev-parse', `refs/heads/${fixture.branch}`]), fixture.head);
+});
+
+test('retire detects a peer link added after its first plan', async (t) => {
+  const fixture = createFixture(t);
+  let inspected = 0;
+  const report = await retireWorktree(fixture.linked, {
+    apply: true, yes: true, retainBranch: true,
+    inspectProcesses: async () => {
+      inspected += 1;
+      if (inspected === 2) fs.symlinkSync(fixture.linked, path.join(fixture.repo, 'new-link'));
+      return noProcesses();
+    },
+  });
+  assert.equal(inspected, 2);
+  assert.equal(report.status, 'blocked');
+  assert.match(report.blockedReasons.join('\n'), /shared symlink target/);
+  assert.equal(fs.existsSync(fixture.linked), true);
+});
+
 test('retire is read-only by default and emits a stable evidence receipt', async (t) => {
   const fixture = createFixture(t);
   const report = await retireWorktree(fixture.linked, { inspectProcesses: noProcesses });

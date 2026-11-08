@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { git } from './git.js';
+import { inspectIncomingSymlinks, sharedReferenceBlockers } from './shared-references.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MIN_AGE_MINUTES = 10;
@@ -15,6 +16,7 @@ export async function scanRunnerCacheRoots(roots, options = {}) {
   const minAgeMinutes = options.minAgeMinutes ?? DEFAULT_MIN_AGE_MINUTES;
   const reports = await Promise.all(roots.map((root) => scanRunnerCacheRoot(root, {
     ...options,
+    referenceRoots: [...new Set([...(options.referenceRoots ?? []), ...roots])],
     minAgeMinutes,
   })));
   const projects = reports
@@ -47,6 +49,7 @@ export async function applyRunnerCacheReport(report, options = {}) {
   if (options.explicitRoots !== true) {
     throw new Error('Permanent reclaim requires at least one explicit root.');
   }
+  options = { ...options, referenceRoots: [...new Set([...(options.referenceRoots ?? []), ...report.roots])] };
 
   const projects = [];
   for (const project of report.projects) {
@@ -54,7 +57,18 @@ export async function applyRunnerCacheReport(report, options = {}) {
       projects.push(project);
       continue;
     }
-    const refreshed = await analyzeRunnerFlutterCache(project.projectRoot, project.cacheRelativePath, options);
+    const scopedOptions = {
+      ...options,
+      workflowRoots: [...new Set([
+        ...(options.workflowRoots ?? []),
+        ...project.targets.flatMap((target) => target.referenceScope?.gitRoots ?? []),
+      ])],
+      referenceRoots: [...new Set([
+        ...options.referenceRoots,
+        ...project.targets.flatMap((target) => target.referenceScope?.referenceRoots ?? []),
+      ])],
+    };
+    const refreshed = await analyzeRunnerFlutterCache(project.projectRoot, project.cacheRelativePath, scopedOptions);
     if (!refreshed) {
       projects.push({
         ...project,
@@ -82,7 +96,7 @@ export async function applyRunnerCacheReport(report, options = {}) {
       continue;
     }
 
-    const removal = await removeRunnerCacheTarget(refreshed.targets[0], options);
+    const removal = await removeRunnerCacheTarget(refreshed.targets[0], scopedOptions);
     const remaining = await pathBytes(refreshed.targets[0].absolutePath, options);
     const verifiedTargetBytesRemoved = Math.max(
       0,
@@ -93,7 +107,7 @@ export async function applyRunnerCacheReport(report, options = {}) {
     if (!remaining.ok && remaining.error !== 'target no longer exists') partialReasons.push(remaining.error);
     projects.push({
       ...refreshed,
-      status: partialReasons.length > 0 ? 'partial' : 'cleaned',
+      status: removal.blocked ? 'blocked' : partialReasons.length > 0 ? 'partial' : 'cleaned',
       verifiedTargetBytesRemoved,
       blockedReasons: partialReasons,
       actionResult: removal,
@@ -385,6 +399,13 @@ async function inspectRunnerCacheTarget(runnerRoot, relativePath, options) {
   const recent = await isRecent(absolutePath, options.minAgeMinutes ?? DEFAULT_MIN_AGE_MINUTES, options);
   if (!recent.ok) blockedReasons.push(`cannot inspect freshness for ${relativePath}: ${recent.error}`);
   if (recent.recent) blockedReasons.push(`${relativePath} changed within ${options.minAgeMinutes ?? DEFAULT_MIN_AGE_MINUTES} minutes`);
+  const referenceScope = {
+    gitRoots: options.workflowRoots ?? [],
+    referenceRoots: [...new Set([runnerRoot, ...(options.referenceRoots ?? [])])],
+  };
+  const sharedReferences = blockedReasons.length === 0
+    ? await inspectIncomingSymlinks(absolutePath, { ...options, ...referenceScope }) : null;
+  if (sharedReferences) blockedReasons.push(...sharedReferenceBlockers(sharedReferences));
   return {
     exists: true,
     relativePath,
@@ -400,6 +421,8 @@ async function inspectRunnerCacheTarget(runnerRoot, relativePath, options) {
     ignored: null,
     tracked: null,
     recent: recent.ok ? recent.recent : null,
+    referenceScope,
+    sharedReferences,
     blockedReasons,
   };
 }
@@ -414,6 +437,16 @@ async function detectActiveRunnerWorker(runnerRoot, options) {
 }
 
 async function removeRunnerCacheTarget(target, options) {
+  const sharedReferences = await inspectIncomingSymlinks(target.absolutePath, {
+    ...options,
+    ...target.referenceScope,
+  });
+  if (!sharedReferences.safe) {
+    return {
+      ok: false, blocked: true, removed: [], sharedReferences,
+      error: sharedReferenceBlockers(sharedReferences).join('; '),
+    };
+  }
   let current;
   try {
     current = await fs.promises.lstat(target.absolutePath);

@@ -569,6 +569,8 @@ Reclaim options:
   --apply --yes          Permanently execute an approved plan. Both flags and
                          at least one explicit root are required. The command
                          revalidates evidence immediately before each action.
+                         Incoming symlinks from registered peers and scan roots
+                         block deletion; incomplete reference checks fail closed.
   --min-free-gb <n>      disk-pressure threshold in GiB. Default: 20.
 
 Session completion:

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { git } from './git.js';
 import { scanRoots } from './scanner.js';
+import { inspectIncomingSymlinks, sharedReferenceBlockers } from './shared-references.js';
 
 const execFileAsync = promisify(execFile);
 const RETIRE_SCHEMA_VERSION = 2;
@@ -51,6 +52,21 @@ export async function retireWorktree(targetPath, options = {}) {
     }
   }
 
+  const sharedReferences = await inspectIncomingSymlinks(current.target, {
+    ...options,
+    gitRoots: [current.primaryPath],
+  });
+  if (!sharedReferences.safe) {
+    return {
+      ...blockedAtApply(current, sharedReferenceBlockers(sharedReferences).join('; ')),
+      sharedReferences,
+    };
+  }
+  const finalIdentity = await inspectCurrentIdentity(current.target);
+  if (!finalIdentity.ok || finalIdentity.head !== current.head
+    || finalIdentity.branch !== current.branch || finalIdentity.detached !== current.detached) {
+    return blockedAtApply(current, 'branch or HEAD changed during incoming symlink inspection');
+  }
   const removal = await git(current.primaryPath, ['worktree', 'remove', current.target]);
   if (!removal.ok) {
     return {
@@ -109,6 +125,11 @@ export async function buildRetirePlan(targetPath, options = {}) {
   const processes = await inspectProcesses(target, options);
   const localOnlyBranch = localOnlyBranchEvidence(worktree, options);
   const blockedReasons = collectBlockedReasons(repo, worktree, processes, localOnlyBranch);
+  const sharedReferences = await inspectIncomingSymlinks(target, {
+    ...options,
+    gitRoots: [repo.primaryPath],
+  });
+  blockedReasons.push(...sharedReferenceBlockers(sharedReferences));
   const eligible = blockedReasons.length === 0;
   const preservation = buildPreservationEvidence(worktree);
   const evidence = {
@@ -162,6 +183,7 @@ export async function buildRetirePlan(targetPath, options = {}) {
         .map((item) => item.message),
     },
     processCheck: processes,
+    sharedReferences,
     blockedReasons,
     fingerprint: fingerprint(evidence),
   };

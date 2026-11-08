@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { git } from './git.js';
 import { mapWithConcurrency, resolveConcurrency } from './scanner.js';
 import { applyRunnerCacheReport, scanRunnerCacheRoots } from './runner-cache.js';
+import { inspectIncomingSymlinks, sharedReferenceBlockers } from './shared-references.js';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MIN_AGE_MINUTES = 10;
@@ -123,6 +124,7 @@ async function scanSingleReclaimProvider(roots, options) {
     concurrency,
     (projectRoot) => analyzeProject(projectRoot, {
       ...options,
+      referenceRoots: [...new Set([...(options.referenceRoots ?? []), ...discovery.roots])],
       flutterConfig,
       minAgeMinutes,
       mode,
@@ -622,6 +624,7 @@ export async function applyReclaimReport(report, options = {}) {
   if (report.tool === 'runner') return applyRunnerCacheReport(report, options);
   if (options.yes !== true) throw new Error('Permanent reclaim requires --apply --yes.');
   if (options.explicitRoots !== true) throw new Error('Permanent reclaim requires at least one explicit root.');
+  options = { ...options, referenceRoots: [...new Set([...(options.referenceRoots ?? []), ...report.roots])] };
 
   const filesystemBefore = await captureFilesystemAvailability(
     report.projects.filter((project) => project.status === 'candidate'),
@@ -634,9 +637,16 @@ export async function applyReclaimReport(report, options = {}) {
       continue;
     }
 
+    const scopedOptions = {
+      ...options,
+      referenceRoots: [...new Set([
+        ...options.referenceRoots,
+        ...project.targets.flatMap((target) => target.referenceScope?.referenceRoots ?? []),
+      ])],
+    };
     const refreshedOptions = project.tool === 'flutter' && options.refreshFlutterConfig
-      ? { ...options, flutterConfig: await readFlutterConfig(options) }
-      : options;
+      ? { ...scopedOptions, flutterConfig: await readFlutterConfig(options) }
+      : scopedOptions;
     const refreshed = await providerAnalyzer(project.tool)(project.projectRoot, {
       ...refreshedOptions,
       mode: project.mode,
@@ -670,6 +680,19 @@ export async function applyReclaimReport(report, options = {}) {
 
     let actionResult;
     try {
+      // Check all full-clean outputs before allowing a command with multiple
+      // side effects. Exact deletion also rechecks each path at its unlink.
+      const sharedCheck = await checkTargetReferences(refreshed.targets, refreshedOptions);
+      if (!sharedCheck.ok) {
+        projects.push({
+          ...refreshed,
+          status: 'blocked',
+          verifiedTargetBytesRemoved: 0,
+          blockedReasons: sharedCheck.blockedReasons,
+          actionResult: sharedCheck,
+        });
+        continue;
+      }
       if (project.mode === 'full-clean') {
         actionResult = refreshedOptions.flutterCleanRunner
           ? await refreshedOptions.flutterCleanRunner(project.projectRoot, refreshedOptions)
@@ -692,7 +715,8 @@ export async function applyReclaimReport(report, options = {}) {
 
     projects.push({
       ...refreshed,
-      status: partialReasons.length > 0 ? 'partial' : 'cleaned',
+      status: actionResult.blocked && actionResult.removed?.length === 0
+        ? 'blocked' : partialReasons.length > 0 ? 'partial' : 'cleaned',
       verifiedTargetBytesRemoved,
       blockedReasons: partialReasons,
       actionResult,
@@ -858,6 +882,14 @@ async function inspectTarget(projectRoot, gitRoot, relativePath, options) {
     blockedReasons.push(`${normalized.value} changed within ${options.minAgeMinutes ?? DEFAULT_MIN_AGE_MINUTES} minutes`);
   }
 
+  const referenceScope = {
+    gitRoots: gitRoot ? [gitRoot] : [],
+    referenceRoots: options.referenceRoots ?? [],
+  };
+  const sharedReferences = blockedReasons.length === 0
+    ? await inspectIncomingSymlinks(absolutePath, { ...options, ...referenceScope }) : null;
+  if (sharedReferences) blockedReasons.push(...sharedReferenceBlockers(sharedReferences));
+
   return {
     exists: true,
     relativePath: normalized.value,
@@ -873,6 +905,8 @@ async function inspectTarget(projectRoot, gitRoot, relativePath, options) {
     ignored,
     tracked,
     recent: recentProbe.ok ? recentProbe.recent : null,
+    referenceScope,
+    sharedReferences,
     blockedReasons,
   };
 }
@@ -910,6 +944,8 @@ async function runFlutterClean(projectRoot, options) {
 async function removeExactTargets(targets, options) {
   const removed = [];
   for (const target of targets) {
+    const sharedCheck = await checkTargetReferences([target], options);
+    if (!sharedCheck.ok) return { ...sharedCheck, removed, blocked: true };
     let current;
     try {
       current = await fs.promises.lstat(target.absolutePath);
@@ -944,6 +980,25 @@ async function removeExactTargets(targets, options) {
     removed.push(target.relativePath);
   }
   return { ok: true, removed, error: null };
+}
+
+async function checkTargetReferences(targets, options) {
+  const checks = [];
+  for (const target of targets) {
+    const check = await inspectIncomingSymlinks(target.absolutePath, {
+      ...options,
+      ...target.referenceScope,
+      referenceRoots: [...new Set([
+        ...(target.referenceScope?.referenceRoots ?? []), ...(options.referenceRoots ?? []),
+      ])],
+    });
+    checks.push(check);
+    if (!check.safe) {
+      const blockedReasons = sharedReferenceBlockers(check);
+      return { ok: false, blocked: true, removed: [], blockedReasons, checks, error: blockedReasons.join('; ') };
+    }
+  }
+  return { ok: true, checks };
 }
 
 async function measureRemainingBytes(targets, options) {

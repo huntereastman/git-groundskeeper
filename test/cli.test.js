@@ -13,7 +13,7 @@ test('--version reports package, commit, state, and source provenance', () => {
   const result = runCli(['--version']);
 
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /^git-groundskeeper 0\.2\.0 \([0-9a-f]{12}, (?:clean|dirty), development-checkout\)\n$/);
+  assert.match(result.stdout, /^git-groundskeeper 0\.2\.1 \([0-9a-f]{12}, (?:clean|dirty), development-checkout\)\n$/);
   assert.equal(result.stderr, '');
 });
 
@@ -57,7 +57,7 @@ test('progress on stderr keeps forced JSON output machine-readable', (t) => {
   assert.equal(result.status, 0);
   const report = JSON.parse(result.stdout);
   assert.equal(report.provenance.name, 'git-groundskeeper');
-  assert.equal(report.provenance.version, '0.2.0');
+  assert.equal(report.provenance.version, '0.2.1');
   assert.match(report.provenance.commit, /^[0-9a-f]{40,64}$/);
   assert.match(result.stderr, /Scanning worktrees/);
   assert.doesNotMatch(result.stderr, /\u001b\[/);

@@ -896,7 +896,7 @@ test('a worktree with a checked-out submodule is never proposed for removal', as
   const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
   const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
 
-  // `git worktree remove` fails outright here: "working trees containing
+  // `git git-groundskeeper retire` fails outright here: "working trees containing
   // submodules cannot be moved or removed". Offering it proposes a command
   // that cannot work, and the submodule's own branch is unexamined besides.
   assert.equal(worktree.submodules.length, 1);
@@ -1097,7 +1097,7 @@ test('an open draft PR marks a clean checkout as WIP without requiring bucket ou
   });
   assert.match(buckets, /blocked: open draft PR marks active WIP \(1\)/);
   assert.match(buckets, /Draft PR #294 -> feature\/foundation/);
-  assert.doesNotMatch(buckets, new RegExp(`worktree remove '${escapeRegExp(linked)}'`));
+  assert.doesNotMatch(buckets, new RegExp(`git-groundskeeper retire '${escapeRegExp(linked)}'`));
 
   let draftQueryCalled = false;
   const skippedReport = await scanRoots([fixture.parent], {
@@ -1227,7 +1227,7 @@ test('a remote-only detached commit is safe only while the live remote retains i
   });
   const guardedRemoval = commandOutput
     .split('\n')
-    .find((line) => line.startsWith('test ') && line.includes(`worktree remove '${linked}'`));
+    .find((line) => line.startsWith('test ') && line.includes(`git-groundskeeper retire '${linked}'`));
   assert.ok(guardedRemoval);
   assert.match(guardedRemoval, /ls-remote --exit-code --heads 'origin' 'refs\/heads\/feature\/remote-retention'/);
 
@@ -1276,7 +1276,7 @@ test('detached removal preserves the commit if its remote ref vanishes after the
   });
   const guardedRemoval = commandOutput
     .split('\n')
-    .find((line) => line.startsWith('test ') && line.includes(`worktree remove '${linked}'`));
+    .find((line) => line.startsWith('test ') && line.includes(`git-groundskeeper retire '${linked}'`));
   assert.ok(guardedRemoval);
 
   const wrapperDirectory = makeTemporaryDirectory('git-groundskeeper-git-wrapper-');
@@ -1301,6 +1301,13 @@ if (result.status === 0 && args.includes('ls-remote')) {
 process.exit(result.status ?? 1);
 `);
   fs.chmodSync(wrapper, 0o755);
+  fs.writeFileSync(path.join(wrapperDirectory, 'git-groundskeeper'), `#!/usr/bin/env node
+const { spawnSync } = require('node:child_process');
+const result = spawnSync(${JSON.stringify(process.execPath)}, [
+  ${JSON.stringify(path.resolve('bin/git-groundskeeper.js'))}, ...process.argv.slice(2),
+], { stdio: 'inherit' });
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
 
   // The wrapper lets ls-remote return the verified tip, deletes that remote
   // ref before the next shell command starts, and then delegates normally.
