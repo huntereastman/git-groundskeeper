@@ -33,6 +33,8 @@ python3 ~/.codex/tools/workspace-storage.py check --thread THREAD_ID
 Registration does not reset an existing baseline. Metered paths include local
 build/dependency directories and external Xcode directories whose native XML or
 binary `info.plist` names an existing workspace inside that exact checkout.
+After the checkout is removed, its matching native metadata still counts
+external output even though the workspace file is gone.
 Symlink targets are skipped. Size failures remain unknown rather than zero.
 This mapping establishes metering attribution, not deletion eligibility.
 An optional `register --growth-limit-mib N` accepts 1 through 1024 MiB for a
@@ -54,6 +56,31 @@ Use `retained` or `active` with a concrete reason and evidence when required
 output must remain. A `cleaned` claim is rejected if at least 1 GiB remains
 above the original baseline. Receipt reasons are operator assertions, not
 verified remote retention or permission to discard files.
+
+Closeout also works after an ordinary Groundskeeper retirement. Keep its
+successful applied JSON receipt and pass it explicitly:
+
+```sh
+python3 ~/.codex/tools/workspace-storage.py closeout \
+  --thread THREAD_ID --workspace /absolute/retired-checkout \
+  --disposition cleaned --reason 'Finished checkout retired; no new output remains' \
+  --evidence /absolute/cleanup-report.md \
+  --retirement-receipt /absolute/applied-retirement.json
+```
+
+The path must already be registered in this thread's ledger and remain absent.
+The receipt must postdate its latest registration so a reused path cannot be
+closed using a previous retirement.
+The helper validates the receipt's exact target, successful removal and retained
+full HEAD, then independently checks that Git no longer registers the worktree
+and that the named retained branch still contains that commit. A missing path,
+read-only plan, stale Git registration, symlink or recreated directory is
+insufficient. Missing Git evidence or an incomplete storage measurement leaves
+the ledger unchanged. Retired checkouts can be marked `cleaned` or `retained`;
+required external products still count against the original growth limit and
+must remain intact. This records accounting only; it never removes or restores
+a checkout. The receipt bytes are hashed and the verified retirement evidence
+is retained with the closeout record. Live-checkout closeout remains unchanged.
 
 The native Stop adapter permits one corrective pass per turn when a registered
 working/active checkout grows at least 1 GiB above its last acknowledged

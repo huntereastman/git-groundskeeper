@@ -1,0 +1,15 @@
+{
+  "qualified_at": "2026-11-08T02:52:12.064155+00:00",
+  "helper_sha256": "75a1e0e982086d418b1f256b4dd50ddf16e36bbbcb14510532cd10dc18d77ddd",
+  "storage_tests_passed": 49,
+  "existing_guard_tests_passed": 47,
+  "installed_cli_reconciled_retired_checkout": true,
+  "reconciled_disposition": "cleaned",
+  "reconciled_output_bytes": 0,
+  "original_baseline_preserved": true,
+  "other_ledger_rows_unchanged": true,
+  "retired_head_retention_verified": true,
+  "retired_path_recreated": false,
+  "hook_definitions_and_guard_code_unchanged": true,
+  "automatic_deletion": false
+}

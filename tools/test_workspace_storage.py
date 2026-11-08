@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -288,6 +290,214 @@ class StorageTests(unittest.TestCase):
                 d["workspaces"][str(self.root / str(i))] = copy.deepcopy(template)
         with self.assertRaisesRegex(ValueError, "before reopening"):
             storage.register("thread-a", str(self.repo), "Reopen after handoff")
+
+    def retired_fixture(self, leave_registration=False, growth_limit_mib=1024):
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.PIPE).decode().strip()
+        git("config", "user.email", "fixture@example.com")
+        git("config", "user.name", "Storage fixture")
+        project = self.repo / "App.xcodeproj"
+        project.mkdir()
+        (project / "project.pbxproj").write_text("fixture source\n")
+        git("add", ".")
+        git("commit", "-qm", "fixture source")
+        retired = self.root / "retired"
+        branch = "feature/retired"
+        git("worktree", "add", "-b", branch, str(retired))
+        head = git("rev-parse", "HEAD")
+        storage.register("thread-a", str(retired), "Retire finished fixture", growth_limit_mib)
+        if leave_registration:
+            shutil.rmtree(retired)  # This test's own fixture, not a valid Git retirement.
+        else:
+            git("worktree", "remove", str(retired))
+        receipt = {"schemaVersion": 2, "kind": "worktree-retirement-receipt",
+                   "apply": True, "status": "removed", "error": None,
+                   "completedAt": storage.stamp(),
+                   "target": str(retired), "primaryPath": str(self.repo),
+                   "branch": branch, "head": head, "retainedRef": "refs/heads/" + branch,
+                   "verification": {"targetRemoved": True, "retainedRefExists": True}}
+        receipt_path = self.root / "retirement.json"
+        receipt_path.write_text(json.dumps(receipt))
+        return retired, receipt_path, receipt, git
+
+    def retired_closeout(self, retired, receipt_path, disposition="cleaned"):
+        return storage.closeout("thread-a", str(retired), disposition,
+                                "Verified finished checkout retirement", str(receipt_path), receipt_path)
+
+    def test_retired_closeout_preserves_baseline_other_entries_and_git(self):
+        retired, receipt_path, receipt, git = self.retired_fixture()
+        self.register_fake(123)
+        before = storage.load("thread-a")
+        status = git("status", "--porcelain=v1")
+        result = self.retired_closeout(retired, receipt_path)
+        after = storage.load("thread-a")
+        row = after["workspaces"][str(retired)]
+        self.assertEqual(row["disposition"], "cleaned")
+        self.assertEqual(row["baseline"], before["workspaces"][str(retired)]["baseline"])
+        self.assertEqual(after["workspaces"][str(self.repo)], before["workspaces"][str(self.repo)])
+        self.assertEqual(result["snapshot"]["allocated_bytes"], 0)
+        self.assertFalse(result["snapshot"]["workspace_present"])
+        self.assertTrue(result["retirement"]["git_registration_absent"])
+        self.assertEqual(result["retirement"]["head"], receipt["head"])
+        self.assertEqual(result["retirement"]["retained_head"], receipt["head"])
+        self.assertEqual(git("rev-parse", receipt["retainedRef"]), receipt["head"])
+        self.assertEqual(git("status", "--porcelain=v1"), status)
+        self.assertFalse(retired.exists())
+        again = self.retired_closeout(retired, receipt_path)
+        self.assertEqual(again["snapshot"]["allocated_bytes"], 0)
+        self.assertEqual(storage.load("thread-a")["workspaces"][str(retired)]["baseline"], row["baseline"])
+
+    def test_retired_closeout_cli_reproduces_missing_checkout_failure(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        args = [sys.executable, str(Path(storage.__file__).resolve()), "closeout", "--thread", "thread-a",
+                "--workspace", str(retired), "--disposition", "cleaned", "--reason",
+                "Verified finished checkout retirement", "--evidence", str(receipt_path)]
+        missing_proof = subprocess.run(args, capture_output=True, text=True)
+        self.assertNotEqual(missing_proof.returncode, 0)
+        self.assertIn("--retirement-receipt", missing_proof.stderr)
+        completed = subprocess.run(args + ["--retirement-receipt", str(receipt_path)], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["disposition"], "cleaned")
+
+    def test_invalid_retirement_receipts_leave_the_ledger_unchanged(self):
+        retired, receipt_path, receipt, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        for update in [{"target": str(self.root / "other")}, {"apply": False}, {"status": "planned"},
+                       {"verification": {"targetRemoved": True}}, {"head": "abcdef0"},
+                       {"retainedRef": "refs/heads/another"}, {"schemaVersion": 3}]:
+            with self.subTest(update=update):
+                receipt_path.write_text(json.dumps({**receipt, **update}))
+                with self.assertRaises(ValueError):
+                    self.retired_closeout(retired, receipt_path)
+                self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_missing_directory_without_retirement_proof_stays_open(self):
+        retired, _, _, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        with self.assertRaisesRegex(ValueError, "--retirement-receipt"):
+            storage.closeout("thread-a", str(retired), "cleaned", "Directory was removed earlier", "fixture:claim")
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_stale_or_future_retirement_cannot_close_a_later_registration(self):
+        retired, receipt_path, receipt, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        for completed in [None, "2000-01-01T00:00:00Z", "2099-01-01T00:00:00Z", "2026-11-07T01:00:00"]:
+            with self.subTest(completed=completed):
+                receipt_path.write_text(json.dumps({**receipt, "completedAt": completed}))
+                with self.assertRaisesRegex(ValueError, "completion time"):
+                    self.retired_closeout(retired, receipt_path)
+                self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+        receipt_path.write_text(json.dumps(receipt))
+        with storage.ledger("thread-a") as data:
+            data["workspaces"][str(retired)]["last_registered_at"] = storage.stamp()
+        with self.assertRaisesRegex(ValueError, "completion time"):
+            self.retired_closeout(retired, receipt_path)
+
+    def test_stale_git_registration_rejects_a_claimed_removal(self):
+        retired, receipt_path, _, _ = self.retired_fixture(leave_registration=True)
+        with self.assertRaisesRegex(ValueError, "still registered"):
+            self.retired_closeout(retired, receipt_path)
+
+    def test_retired_head_must_still_be_on_the_retained_ref(self):
+        retired, receipt_path, receipt, git = self.retired_fixture()
+        git("update-ref", "-d", receipt["retainedRef"])
+        with self.assertRaisesRegex(ValueError, "verification failed"):
+            self.retired_closeout(retired, receipt_path)
+
+    def test_retained_branch_may_advance_without_losing_retired_head(self):
+        retired, receipt_path, receipt, git = self.retired_fixture()
+        (self.repo / "later.txt").write_text("later work\n")
+        git("add", "later.txt")
+        git("commit", "-qm", "later work")
+        later = git("rev-parse", "HEAD")
+        git("update-ref", receipt["retainedRef"], later)
+        result = self.retired_closeout(retired, receipt_path)
+        self.assertEqual(result["retirement"]["retained_head"], later)
+        self.assertNotEqual(later, receipt["head"])
+
+    def test_unrelated_ref_with_same_name_is_not_retention(self):
+        retired, receipt_path, receipt, git = self.retired_fixture()
+        unrelated = git("commit-tree", "HEAD^{tree}", "-m", "unrelated root")
+        git("update-ref", receipt["retainedRef"], unrelated)
+        with self.assertRaisesRegex(ValueError, "verification failed"):
+            self.retired_closeout(retired, receipt_path)
+
+    def test_unregistered_missing_path_cannot_be_added_by_closeout(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            storage.closeout("other-thread", str(retired), "cleaned",
+                             "Claim another task completed", str(receipt_path), receipt_path)
+        self.assertFalse(storage.state_path("other-thread").exists())
+
+    def test_recreated_directory_or_dangling_symlink_is_not_retirement(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        retired.mkdir()
+        with self.assertRaisesRegex(ValueError, "absent"):
+            self.retired_closeout(retired, receipt_path)
+        retired.rmdir()
+        retired.symlink_to(self.root / "missing")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.retired_closeout(retired, receipt_path)
+
+    def test_linked_or_nonregular_receipt_is_rejected(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        link = self.root / "receipt-link"
+        link.symlink_to(receipt_path)
+        with self.assertRaises(OSError):
+            self.retired_closeout(retired, link)
+        fifo = self.root / "receipt-fifo"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "regular JSON"):
+            self.retired_closeout(retired, fifo)
+
+    def test_retired_checkout_cannot_be_marked_active(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        with self.assertRaisesRegex(ValueError, "cannot be marked active"):
+            self.retired_closeout(retired, receipt_path, "active")
+
+    def test_retired_xcode_output_is_metered_and_cannot_hide_growth(self):
+        retired, receipt_path, _, _ = self.retired_fixture(growth_limit_mib=1)
+        owned = self.make_external("retained-native-output", retired / "App.xcodeproj")
+        artifact = owned / "release-product"
+        artifact.write_bytes(b"x" * (2 * 1024 ** 2))
+        foreign = self.make_external("foreign-native-output", self.root / "retired-other/App.xcodeproj")
+        measured = storage.snapshot(retired)
+        self.assertTrue(measured["complete"])
+        self.assertGreater(measured["allocated_bytes"], 1024 ** 2)
+        self.assertEqual([p["path"] for p in measured["paths"]], [str(owned)])
+        self.assertNotIn(str(foreign), [p["path"] for p in measured["paths"]])
+        with self.assertRaisesRegex(ValueError, "growth limit"):
+            self.retired_closeout(retired, receipt_path)
+        result = self.retired_closeout(retired, receipt_path, "retained")
+        self.assertGreater(result["snapshot"]["allocated_bytes"], 1024 ** 2)
+        self.assertEqual(artifact.stat().st_size, 2 * 1024 ** 2)
+
+    def test_retired_incomplete_measurement_does_not_change_ledger(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        with patch.object(storage, "snapshot", return_value=self.fake_snapshot(complete=False)):
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                self.retired_closeout(retired, receipt_path)
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_retired_git_timeout_leaves_ledger_unchanged(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        with patch.object(storage.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 5)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.retired_closeout(retired, receipt_path)
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_retired_path_reappearing_during_measurement_is_refused(self):
+        retired, receipt_path, _, _ = self.retired_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        def concurrent_recreation(*args, **kwargs):
+            retired.mkdir()
+            return self.fake_snapshot()
+        with patch.object(storage, "snapshot", side_effect=concurrent_recreation):
+            with self.assertRaisesRegex(ValueError, "reappeared"):
+                self.retired_closeout(retired, receipt_path)
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
 
 
 class InstallerTests(unittest.TestCase):

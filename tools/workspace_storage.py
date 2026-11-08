@@ -18,6 +18,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -39,6 +40,8 @@ POLICY = (
     "Reuse the task's existing checkout. At closeout, inspect its local and external "
     "Xcode output, clean only verified disposable targets through Groundskeeper, then "
     "record closeout; record a concrete reason and evidence for retained or active output. "
+    "For an already retired checkout, add --retirement-receipt PATH to its successful "
+    "Groundskeeper retirement JSON; missing paths alone are not cleanup proof. "
     "Preserve source, sessions, secrets, release/review evidence and other tasks. "
     "Do not share writable DerivedData between concurrent checkouts."
 )
@@ -150,7 +153,9 @@ def output_paths(workspace, derived_data_root=None):
                     continue
                 source_path = Path(source).resolve()
                 # A matching name or prefix is insufficient; require the actual workspace.
-                if source_path.exists() and inside(source_path, root):
+                # Native metadata still identifies output after its source
+                # checkout is retired. Missing source must not hide DerivedData.
+                if (source_path.exists() or not root.exists()) and inside(source_path, root):
                     paths.append(p)
             except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
                 # Unrelated malformed records do not claim ownership of this checkout.
@@ -180,6 +185,7 @@ def snapshot(workspace, timeout=15, derived_data_root=None):
             errors.append("Size measurement incomplete: " + type(exc).__name__)
     complete = len(sizes) == len(paths) and not errors
     return {"at": stamp(), "workspace": str(workspace), "complete": complete,
+            "workspace_present": Path(workspace).exists(),
             "allocated_bytes": sum(sizes.values()) if complete else None,
             "paths": [{"path": str(p), "allocated_bytes": sizes.get(str(p))} for p in paths],
             "skipped": skipped, "errors": errors,
@@ -201,6 +207,7 @@ def register(thread, workspace, purpose, growth_limit_mib=1024):
                 raise ValueError("Close out an active workspace before reopening another")
             data["workspaces"][root]["disposition"] = "working"
             data["workspaces"][root]["purpose"] = purpose
+            data["workspaces"][root]["last_registered_at"] = stamp()
             data["workspaces"][root]["growth_limit_bytes"] = min(
                 data["workspaces"][root].get("growth_limit_bytes", GROWTH_LIMIT), growth_limit_mib * 1024 ** 2)
             return data["workspaces"][root]
@@ -216,25 +223,127 @@ def register(thread, workspace, purpose, growth_limit_mib=1024):
         return row
 
 
-def closeout(thread, workspace, disposition, reason, evidence):
-    root = str(workspace_root(workspace))
+def retired_workspace_root(value):
+    given = Path(value).expanduser()
+    if not given.is_absolute():
+        raise ValueError("The workspace must be an absolute Git checkout path")
+    if not no_symlink_path(given):
+        raise ValueError("Retired workspace path crosses a symlink")
+    root = given.resolve()
+    if root in {Path.home(), Path("/")} or os.path.lexists(root):
+        raise ValueError("Retirement closeout requires an absent checkout path")
+    return root
+
+
+def verify_retirement(root, receipt_path, registered_at):
+    """Verify completed removal and live local retention, never authorize removal."""
+    receipt_file = Path(receipt_path).expanduser()
+    fd = os.open(receipt_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 2 * 1024 ** 2:
+            raise ValueError("Retirement receipt must be a regular JSON file of at most 2 MiB")
+        with os.fdopen(fd, "rb") as source:
+            fd = None
+            raw = source.read(2 * 1024 ** 2 + 1)
+        if len(raw) > 2 * 1024 ** 2:
+            raise ValueError("Retirement receipt exceeds 2 MiB")
+        receipt = json.loads(raw)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not isinstance(receipt, dict) or receipt.get("kind") != "worktree-retirement-receipt" \
+            or receipt.get("schemaVersion") != 2 or receipt.get("apply") is not True \
+            or receipt.get("status") != "removed" or receipt.get("error"):
+        raise ValueError("Retirement receipt must prove a successful applied Groundskeeper removal")
+    if receipt.get("target") != str(root):
+        raise ValueError("Retirement receipt does not match the registered workspace")
+    try:
+        completed = dt.datetime.fromisoformat(receipt["completedAt"].replace("Z", "+00:00"))
+        registered = dt.datetime.fromisoformat(registered_at.replace("Z", "+00:00"))
+        if completed.utcoffset() is None or registered.utcoffset() is None \
+                or completed < registered or completed > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1):
+            raise ValueError("stale or future retirement")
+    except (KeyError, AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Retirement receipt must have a valid completion time after this workspace's registration") from exc
+    verification = receipt.get("verification")
+    if not isinstance(verification, dict) or verification.get("targetRemoved") is not True \
+            or verification.get("retainedRefExists") is not True:
+        raise ValueError("Retirement receipt has incomplete removal or retention verification")
+    head, retained_ref, branch = (receipt.get(key) for key in ["head", "retainedRef", "branch"])
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head):
+        raise ValueError("Retirement receipt requires the full retired HEAD")
+    expected_ref = "refs/heads/" + branch if isinstance(branch, str) and branch else \
+        "refs/heads/git-groundskeeper/retained-detached/" + head
+    if retained_ref != expected_ref:
+        raise ValueError("Retirement receipt does not name its retained branch")
+    primary_value = receipt.get("primaryPath")
+    if not isinstance(primary_value, str):
+        raise ValueError("Retirement receipt requires the retained primary checkout")
+    primary = workspace_root(primary_value)
+
+    def read_git(*args):
+        result = subprocess.run(["git", "-C", str(primary), *args],
+                                capture_output=True, text=True, timeout=5,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0",
+                                     "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1"})
+        if result.returncode:
+            raise ValueError("Retirement verification failed: git " + args[0])
+        return result.stdout
+
+    registered = read_git("worktree", "list", "--porcelain", "-z")
+    if any(field.startswith("worktree ") and Path(field[9:]).resolve() == root
+           for field in registered.split("\0")):
+        raise ValueError("Retired workspace is still registered with Git")
+    retained_head = read_git("show-ref", "--verify", "--hash", retained_ref).strip()
+    read_git("merge-base", "--is-ancestor", head, retained_ref)
+    # Receipt fields alone never establish that a currently absent checkout
+    # stayed absent. Check again after the bounded Git probes.
+    if os.path.lexists(root) or not no_symlink_path(root):
+        raise ValueError("Retired workspace path reappeared during verification")
+    return {"receipt": str(receipt_file.resolve()), "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+            "primary_path": str(primary), "head": head, "retained_ref": retained_ref,
+            "retained_head": retained_head, "target_absent": True,
+            "git_registration_absent": True, "head_retained": True,
+            "completed_at": receipt["completedAt"], "verified_at": stamp()}
+
+
+def closeout(thread, workspace, disposition, reason, evidence, retirement_receipt=None):
+    if disposition not in {"cleaned", "retained", "active"}:
+        raise ValueError("Unknown closeout disposition")
+    if retirement_receipt and disposition == "active":
+        raise ValueError("A retired checkout cannot be marked active; retain required external output explicitly")
+    if retirement_receipt:
+        root = str(retired_workspace_root(workspace))
+    else:
+        try:
+            root = str(workspace_root(workspace))
+        except FileNotFoundError as exc:
+            raise ValueError("Checkout is absent; supply --retirement-receipt with its successful Groundskeeper removal JSON") from exc
     if len(reason.strip()) < 12 or not evidence.strip():
         raise ValueError("Closeout needs a concrete reason and an evidence reference")
     with ledger(thread) as data:
         if root not in data["workspaces"]:
             raise ValueError("Workspace was not registered before this task's build")
+        row = data["workspaces"][root]
+        retirement = verify_retirement(Path(root), retirement_receipt,
+                                       row.get("last_registered_at", row.get("registered_at"))) if retirement_receipt else None
         current = snapshot(root)
         if not current["complete"]:
             raise ValueError("Cannot acknowledge an incomplete measurement")
-        row = data["workspaces"][root]
         growth = current["allocated_bytes"] - row["baseline"]["allocated_bytes"]
         limit = min(row.get("growth_limit_bytes", GROWTH_LIMIT), GROWTH_LIMIT)
         if disposition == "cleaned" and growth >= limit:
             raise ValueError(f"Output remains above the registered {limit / GIB:g} GiB growth limit; clean proven output or explicitly retain it with evidence")
+        if retirement and (os.path.lexists(root) or not no_symlink_path(Path(root))):
+            raise ValueError("Retired workspace path reappeared during measurement")
         row.update(accounted=current, disposition=disposition, reason=reason,
                    evidence=evidence, closed_at=stamp())
+        if retirement:
+            row["retirement"] = retirement
         return {"workspace": root, "disposition": disposition, "growth_bytes": growth,
-                "snapshot": current, "reason": reason, "evidence": evidence}
+                "snapshot": current, "reason": reason, "evidence": evidence,
+                **({"retirement": retirement} if retirement else {})}
 
 
 def pressure_context(event_name, message):
@@ -348,11 +457,13 @@ def cli(argv=None):
             p.add_argument("--disposition", choices=["cleaned", "retained", "active"], required=True)
             p.add_argument("--reason", required=True)
             p.add_argument("--evidence", required=True)
+            p.add_argument("--retirement-receipt", help="Successful applied Groundskeeper retirement JSON for an already removed checkout")
     args = parser.parse_args(argv)
     if args.command == "register":
         result = register(args.thread, args.workspace, args.purpose, args.growth_limit_mib)
     elif args.command == "closeout":
-        result = closeout(args.thread, args.workspace, args.disposition, args.reason, args.evidence)
+        result = closeout(args.thread, args.workspace, args.disposition, args.reason, args.evidence,
+                          args.retirement_receipt)
     else:
         data = load(args.thread)
         result = {"thread": args.thread, "workspaces": [
