@@ -82,6 +82,28 @@ must remain intact. This records accounting only; it never removes or restores
 a checkout. The receipt bytes are hashed and the verified retirement evidence
 is retained with the closeout record. Live-checkout closeout remains unchanged.
 
+Legacy repository-managed QA/release snapshots can use the same flag with a
+`schemaVersion: 1`, `kind: managed-workspace-retirement-reconciliation` manifest.
+It names the exact `target`, `head`, `primaryPath` and local `retainedRef`, and
+pins the original `cleanup` and `manager` JSON by absolute `path` and `sha256`.
+Its `artifact` names the retained release file by absolute `path` and `sha256`.
+This is explicitly a reconciliation record, not a claim that Groundskeeper
+performed the original removal.
+
+The supported legacy contract is `receipts-only-v1` in its native
+`PROJECT/retained/managed/LEASE_ID/receipt.json` layout, with a source-only
+snapshot under `PROJECT/qa`. Source identity and empty tracked diff must match
+the owner's completed redundant-snapshot cleanup report, including the original
+input-retention acknowledgement and release artifact digest. Both receipt times
+must postdate ledger registration. The helper checks the current native
+`.build-storage/lease.json` before and after verification and refuses a matching
+or unknown active lease. Other current leases remain untouched. It independently
+checks Git retention and hashes the retained artifact without changing it (up
+to 4 GiB with a 15-second hash budget). Missing/changed artifacts, altered
+receipts, active/recreated snapshots and ambiguous retention leave the ledger
+unchanged. Build success and cleanup completion are distinct: a failed follow-up
+command does not erase a verified retained artifact or prove an active snapshot.
+
 The native Stop adapter permits one corrective pass per turn when a registered
 working/active checkout grows at least 1 GiB above its last acknowledged
 measurement. It respects Stop recursion, explicit halt requests, existing guard

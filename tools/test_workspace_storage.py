@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -291,7 +292,7 @@ class StorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "before reopening"):
             storage.register("thread-a", str(self.repo), "Reopen after handoff")
 
-    def retired_fixture(self, leave_registration=False, growth_limit_mib=1024):
+    def retired_fixture(self, leave_registration=False, growth_limit_mib=1024, retired_path=None):
         def git(*args):
             return subprocess.check_output(["git", "-C", str(self.repo), *args], stderr=subprocess.PIPE).decode().strip()
         git("config", "user.email", "fixture@example.com")
@@ -301,7 +302,8 @@ class StorageTests(unittest.TestCase):
         (project / "project.pbxproj").write_text("fixture source\n")
         git("add", ".")
         git("commit", "-qm", "fixture source")
-        retired = self.root / "retired"
+        retired = retired_path or self.root / "retired"
+        retired.parent.mkdir(parents=True, exist_ok=True)
         branch = "feature/retired"
         git("worktree", "add", "-b", branch, str(retired))
         head = git("rev-parse", "HEAD")
@@ -498,6 +500,136 @@ class StorageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reappeared"):
                 self.retired_closeout(retired, receipt_path)
         self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def managed_fixture(self, leave_registration=False):
+        project = self.root / "volume/project"
+        retired, _, previous, _ = self.retired_fixture(
+            leave_registration=leave_registration, retired_path=project / "qa/snapshot")
+        manager_path = project / "retained/managed/old-job/receipt.json"
+        manager_path.parent.mkdir(parents=True)
+        manager = {"policy": "receipts-only-v1", "lease": {"id": "old-job", "workspace": str(retired), "kind": "release"},
+                   "success": False, "source": {"head": previous["head"], "tracked_diff_sha256": hashlib.sha256(b"").hexdigest()},
+                   "remaining_workspace": str(retired), "completed_at": storage.stamp()}
+        manager_path.write_text(json.dumps(manager))
+        artifact = self.root / "release/candidate.aab"
+        artifact.parent.mkdir()
+        artifact.write_bytes(b"fixture retained release artifact")
+        artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        cleanup_path = self.root / "cleanup.json"
+        cleanup = {"workspace": str(retired), "source_sha": previous["head"], "managed_receipt": "old-job",
+                   "all_original_input_receipts_match": True, "retained_artifact_sha256": artifact_sha,
+                   "result": "Removed only reviewed generated additions and the verified redundant source snapshot",
+                   "completed_at": storage.stamp()}
+        cleanup_path.write_text(json.dumps(cleanup))
+        payload = {"schemaVersion": 1, "kind": "managed-workspace-retirement-reconciliation", "target": str(retired),
+                   "head": previous["head"], "primaryPath": str(self.repo), "retainedRef": previous["retainedRef"],
+                   "cleanup": {"path": str(cleanup_path), "sha256": hashlib.sha256(cleanup_path.read_bytes()).hexdigest()},
+                   "manager": {"path": str(manager_path), "sha256": hashlib.sha256(manager_path.read_bytes()).hexdigest()},
+                   "artifact": {"path": str(artifact), "sha256": artifact_sha}}
+        receipt = self.root / "managed-reconciliation.json"
+        receipt.write_text(json.dumps(payload))
+        active_lease = project.parent / ".build-storage/lease.json"
+        active_lease.parent.mkdir()
+        active_lease.write_text(json.dumps({"id": "current-ci", "workspace": str(project / "work/current-ci")}))
+        return {"retired": retired, "receipt": receipt, "payload": payload, "cleanup": cleanup,
+                "cleanup_path": cleanup_path, "manager": manager, "manager_path": manager_path,
+                "artifact": artifact, "lease": active_lease}
+
+    def test_managed_retirement_preserves_release_artifact_and_other_active_lease(self):
+        case = self.managed_fixture()
+        artifact = case["artifact"].read_bytes()
+        lease = case["lease"].read_bytes()
+        result = self.retired_closeout(case["retired"], case["receipt"], "retained")
+        self.assertEqual(result["disposition"], "retained")
+        self.assertEqual(result["snapshot"]["allocated_bytes"], 0)
+        self.assertEqual(result["retirement"]["provider"], "repository-managed-reconciliation")
+        self.assertEqual(result["retirement"]["artifact"]["sha256"], hashlib.sha256(artifact).hexdigest())
+        self.assertEqual(case["artifact"].read_bytes(), artifact)
+        self.assertEqual(case["lease"].read_bytes(), lease)
+        self.assertFalse(case["retired"].exists())
+
+    def test_managed_retirement_cli_uses_the_original_pinned_receipts(self):
+        case = self.managed_fixture()
+        result = subprocess.run([sys.executable, str(Path(storage.__file__).resolve()), "closeout",
+                                 "--thread", "thread-a", "--workspace", str(case["retired"]),
+                                 "--disposition", "retained", "--reason", "Retired snapshot; release artifact remains required",
+                                 "--evidence", str(case["receipt"]), "--retirement-receipt", str(case["receipt"])],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proof = json.loads(result.stdout)["retirement"]
+        self.assertEqual(proof["cleanup"]["receipt_sha256"], case["payload"]["cleanup"]["sha256"])
+        self.assertTrue(case["artifact"].exists())
+
+    def test_managed_evidence_changed_after_pinning_does_not_close_ledger(self):
+        case = self.managed_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        case["cleanup_path"].write_text(json.dumps({**case["cleanup"], "workspace": "another-workspace"}))
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            self.retired_closeout(case["retired"], case["receipt"])
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_managed_target_cleanup_source_and_policy_must_match(self):
+        case = self.managed_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        mutations = [("cleanup", {"workspace": str(self.root / "other")}),
+                     ("cleanup", {"source_sha": "a" * 40}),
+                     ("cleanup", {"all_original_input_receipts_match": False}),
+                     ("cleanup", {"result": "kept for review"}),
+                     ("cleanup", {"completed_at": "2000-01-01T00:00:00Z"}),
+                     ("manager", {"policy": "unknown"}),
+                     ("manager", {"source": {"head": case["payload"]["head"], "tracked_diff_sha256": "dirty"}}),
+                     ("manager", {"lease": {"id": "old-job", "workspace": str(case["retired"]), "kind": "ci"}})]
+        for name, update in mutations:
+            with self.subTest(name=name, update=update):
+                payload = copy.deepcopy(case["payload"])
+                for field in ["cleanup", "manager"]:
+                    contents = {**case[field], **(update if field == name else {})}
+                    p = case[field + "_path"]
+                    p.write_text(json.dumps(contents))
+                    payload[field]["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
+                case["receipt"].write_text(json.dumps(payload))
+                with self.assertRaises(ValueError):
+                    self.retired_closeout(case["retired"], case["receipt"])
+                self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_managed_active_or_unknown_lease_prevents_reconciliation(self):
+        case = self.managed_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        for lease in [{"id": "old-job", "workspace": str(self.root / "other")},
+                      {"id": "new-job", "workspace": str(case["retired"])}, {}]:
+            case["lease"].write_text(json.dumps(lease))
+            with self.assertRaisesRegex(ValueError, "active or unknown lease"):
+                self.retired_closeout(case["retired"], case["receipt"])
+            self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_managed_missing_or_changed_release_artifact_keeps_entry_open(self):
+        case = self.managed_fixture()
+        before = storage.state_path("thread-a").read_bytes()
+        case["artifact"].write_text("changed fixture bytes")
+        with self.assertRaisesRegex(ValueError, "wrong digest"):
+            self.retired_closeout(case["retired"], case["receipt"])
+        case["artifact"].unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.retired_closeout(case["retired"], case["receipt"])
+        self.assertEqual(storage.state_path("thread-a").read_bytes(), before)
+
+    def test_managed_recreated_path_and_stale_git_registration_are_refused(self):
+        case = self.managed_fixture(leave_registration=True)
+        with self.assertRaisesRegex(ValueError, "still registered"):
+            self.retired_closeout(case["retired"], case["receipt"])
+        case["retired"].mkdir()
+        with self.assertRaisesRegex(ValueError, "absent"):
+            self.retired_closeout(case["retired"], case["receipt"])
+
+    def test_managed_copied_receipt_cannot_redirect_the_active_lease_check(self):
+        case = self.managed_fixture()
+        copied = self.root / "copied-manager.json"
+        copied.write_bytes(case["manager_path"].read_bytes())
+        payload = case["payload"]
+        payload["manager"]["path"] = str(copied)
+        case["receipt"].write_text(json.dumps(payload))
+        with self.assertRaisesRegex(ValueError, "native retained-record layout"):
+            self.retired_closeout(case["retired"], case["receipt"])
 
 
 class InstallerTests(unittest.TestCase):

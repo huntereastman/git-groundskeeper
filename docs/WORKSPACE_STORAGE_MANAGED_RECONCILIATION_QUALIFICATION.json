@@ -1,0 +1,15 @@
+{
+  "qualified_at": "2026-11-08T03:12:25.869080+00:00",
+  "helper_sha256": "2b058f6d8e8c4b5a781cb8794a68a48be981f8f72b5d57d7d23796679f78387a",
+  "storage_tests_passed": 57,
+  "guard_tests_passed": 47,
+  "installed_managed_reconciliation_succeeded": true,
+  "retired_entry_disposition": "retained",
+  "retired_local_and_native_output_bytes": 0,
+  "release_artifact_digest_preserved": true,
+  "original_ledger_baseline_preserved": true,
+  "live_author_checkout_entry_unchanged": true,
+  "active_managed_lease_untouched": true,
+  "guard_code_and_hook_definitions_unchanged": true,
+  "release_files_deleted": 0
+}

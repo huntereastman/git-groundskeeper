@@ -40,8 +40,8 @@ POLICY = (
     "Reuse the task's existing checkout. At closeout, inspect its local and external "
     "Xcode output, clean only verified disposable targets through Groundskeeper, then "
     "record closeout; record a concrete reason and evidence for retained or active output. "
-    "For an already retired checkout, add --retirement-receipt PATH to its successful "
-    "Groundskeeper retirement JSON; missing paths alone are not cleanup proof. "
+    "For an already retired checkout, add --retirement-receipt PATH pointing to "
+    "verified retirement JSON; missing paths alone are not cleanup proof. "
     "Preserve source, sessions, secrets, release/review evidence and other tasks. "
     "Do not share writable DerivedData between concurrent checkouts."
 )
@@ -235,8 +235,7 @@ def retired_workspace_root(value):
     return root
 
 
-def verify_retirement(root, receipt_path, registered_at):
-    """Verify completed removal and live local retention, never authorize removal."""
+def read_retirement_json(receipt_path):
     receipt_file = Path(receipt_path).expanduser()
     fd = os.open(receipt_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -252,32 +251,54 @@ def verify_retirement(root, receipt_path, registered_at):
     finally:
         if fd is not None:
             os.close(fd)
+    return receipt, {"receipt": str(receipt_file.resolve()),
+                     "receipt_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def verify_completion_time(completed_at, registered_at):
+    try:
+        completed = dt.datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        registered = dt.datetime.fromisoformat(registered_at.replace("Z", "+00:00"))
+        if completed.utcoffset() is None or registered.utcoffset() is None \
+                or completed < registered or completed > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1):
+            raise ValueError("stale or future retirement")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Retirement receipt must have a valid completion time after this workspace's registration") from exc
+
+
+def verify_retirement(root, receipt_path, registered_at):
+    """Verify completed removal and live local retention, never authorize removal."""
+    receipt, evidence = read_retirement_json(receipt_path)
+    if isinstance(receipt, dict) and receipt.get("kind") == "managed-workspace-retirement-reconciliation":
+        return verify_managed_retirement(root, receipt, evidence, registered_at)
     if not isinstance(receipt, dict) or receipt.get("kind") != "worktree-retirement-receipt" \
             or receipt.get("schemaVersion") != 2 or receipt.get("apply") is not True \
             or receipt.get("status") != "removed" or receipt.get("error"):
         raise ValueError("Retirement receipt must prove a successful applied Groundskeeper removal")
     if receipt.get("target") != str(root):
         raise ValueError("Retirement receipt does not match the registered workspace")
-    try:
-        completed = dt.datetime.fromisoformat(receipt["completedAt"].replace("Z", "+00:00"))
-        registered = dt.datetime.fromisoformat(registered_at.replace("Z", "+00:00"))
-        if completed.utcoffset() is None or registered.utcoffset() is None \
-                or completed < registered or completed > dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=1):
-            raise ValueError("stale or future retirement")
-    except (KeyError, AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("Retirement receipt must have a valid completion time after this workspace's registration") from exc
+    verify_completion_time(receipt.get("completedAt"), registered_at)
     verification = receipt.get("verification")
     if not isinstance(verification, dict) or verification.get("targetRemoved") is not True \
             or verification.get("retainedRefExists") is not True:
         raise ValueError("Retirement receipt has incomplete removal or retention verification")
     head, retained_ref, branch = (receipt.get(key) for key in ["head", "retainedRef", "branch"])
-    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head):
+    if not isinstance(head, str):
         raise ValueError("Retirement receipt requires the full retired HEAD")
     expected_ref = "refs/heads/" + branch if isinstance(branch, str) and branch else \
         "refs/heads/git-groundskeeper/retained-detached/" + head
     if retained_ref != expected_ref:
         raise ValueError("Retirement receipt does not name its retained branch")
-    primary_value = receipt.get("primaryPath")
+    return {**evidence,
+            **verify_git_retirement(root, receipt.get("primaryPath"), head, retained_ref),
+            "completed_at": receipt["completedAt"], "verified_at": stamp()}
+
+
+def verify_git_retirement(root, primary_value, head, retained_ref):
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head):
+        raise ValueError("Retirement receipt requires the full retired HEAD")
+    if not isinstance(retained_ref, str) or not retained_ref.startswith("refs/heads/"):
+        raise ValueError("Retirement receipt requires a retained local branch")
     if not isinstance(primary_value, str):
         raise ValueError("Retirement receipt requires the retained primary checkout")
     primary = workspace_root(primary_value)
@@ -301,11 +322,103 @@ def verify_retirement(root, receipt_path, registered_at):
     # stayed absent. Check again after the bounded Git probes.
     if os.path.lexists(root) or not no_symlink_path(root):
         raise ValueError("Retired workspace path reappeared during verification")
-    return {"receipt": str(receipt_file.resolve()), "receipt_sha256": hashlib.sha256(raw).hexdigest(),
-            "primary_path": str(primary), "head": head, "retained_ref": retained_ref,
+    return {"primary_path": str(primary), "head": head, "retained_ref": retained_ref,
             "retained_head": retained_head, "target_absent": True,
-            "git_registration_absent": True, "head_retained": True,
-            "completed_at": receipt["completedAt"], "verified_at": stamp()}
+            "git_registration_absent": True, "head_retained": True}
+
+
+def verify_managed_retirement(root, receipt, evidence, registered_at):
+    """Reconcile legacy receipts-only-v1 snapshots without impersonating a GG removal."""
+    if receipt.get("schemaVersion") != 1 or receipt.get("target") != str(root):
+        raise ValueError("Managed retirement evidence does not match the registered workspace")
+
+    def pinned_json(name):
+        pin = receipt.get(name)
+        if not isinstance(pin, dict) or not isinstance(pin.get("path"), str) \
+                or not Path(pin["path"]).is_absolute():
+            raise ValueError("Managed retirement requires a pinned " + name + " receipt")
+        data, proof = read_retirement_json(pin["path"])
+        if pin.get("sha256") != proof["receipt_sha256"] or not isinstance(data, dict):
+            raise ValueError("Managed retirement " + name + " receipt digest mismatch")
+        return data, proof
+
+    cleanup, cleanup_proof = pinned_json("cleanup")
+    manager, manager_proof = pinned_json("manager")
+    lease = manager.get("lease")
+    source = manager.get("source")
+    if not isinstance(lease, dict) or not isinstance(source, dict):
+        raise ValueError("Managed retirement is missing its lease or source identity")
+    head = receipt.get("head")
+    if manager.get("policy") != "receipts-only-v1" or lease.get("workspace") != str(root) \
+            or lease.get("kind") not in {"qa", "release"} or source.get("head") != head \
+            or source.get("tracked_diff_sha256") != hashlib.sha256(b"").hexdigest():
+        raise ValueError("Managed receipt does not prove a source-only task snapshot")
+    if cleanup.get("workspace") != str(root) or cleanup.get("source_sha") != head \
+            or cleanup.get("managed_receipt") != lease.get("id") \
+            or cleanup.get("all_original_input_receipts_match") is not True \
+            or cleanup.get("result") != "Removed only reviewed generated additions and the verified redundant source snapshot":
+        raise ValueError("Managed cleanup does not prove completed redundant-snapshot retirement")
+    verify_completion_time(cleanup.get("completed_at"), registered_at)
+    verify_completion_time(manager.get("completed_at"), registered_at)
+    if dt.datetime.fromisoformat(manager["completed_at"].replace("Z", "+00:00")) \
+            > dt.datetime.fromisoformat(cleanup["completed_at"].replace("Z", "+00:00")):
+        raise ValueError("Managed cleanup predates its build completion receipt")
+
+    # Bind the active-lease check to the manager's native on-volume layout.
+    # A different current CI/release lease is observed but never changed.
+    manager_file = Path(manager_proof["receipt"])
+    if manager_file.name != "receipt.json" or manager_file.parent.name != lease.get("id") \
+            or manager_file.parent.parent.name != "managed" or manager_file.parent.parent.parent.name != "retained":
+        raise ValueError("Managed receipt is outside its native retained-record layout")
+    project_root = manager_file.parent.parent.parent.parent
+    if not inside(root, project_root / "qa"):
+        raise ValueError("Managed snapshot is outside the manager's QA root")
+    lease_file = project_root.parent / ".build-storage/lease.json"
+
+    def inactive_lease():
+        if lease_file.is_symlink():
+            raise ValueError("Managed lease file is a symlink")
+        if lease_file.exists():
+            current, _ = read_retirement_json(lease_file)
+            if not isinstance(current, dict) or not isinstance(current.get("id"), str) \
+                    or not current["id"] or not isinstance(current.get("workspace"), str) \
+                    or not Path(current["workspace"]).is_absolute() or current.get("workspace") == str(root) \
+                    or current.get("id") == lease.get("id"):
+                raise ValueError("Managed snapshot still has an active or unknown lease")
+
+    inactive_lease()
+    artifact = receipt.get("artifact")
+    if not isinstance(artifact, dict) or artifact.get("sha256") != cleanup.get("retained_artifact_sha256") \
+            or not isinstance(artifact.get("path"), str) or not Path(artifact["path"]).is_absolute() \
+            or inside(Path(artifact["path"]).resolve(), root):
+        raise ValueError("Managed retirement requires the original retained release artifact")
+    # Read bytes only; release artifacts are never moved, rewritten or deleted.
+    fd = os.open(artifact["path"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 4 * GIB:
+            raise ValueError("Retained artifact must be a regular file of at most 4 GiB")
+        with os.fdopen(fd, "rb") as output:
+            fd = None
+            digest = hashlib.sha256()
+            deadline = time.monotonic() + 15
+            while chunk := output.read(1024 ** 2):
+                if time.monotonic() > deadline:
+                    raise ValueError("Retained release artifact verification timed out")
+                digest.update(chunk)
+            actual_digest = digest.hexdigest()
+            after = os.fstat(output.fileno())
+        if actual_digest != artifact.get("sha256") or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("Retained release artifact is missing, changed or has the wrong digest")
+    finally:
+        if fd is not None:
+            os.close(fd)
+    verified = verify_git_retirement(root, receipt.get("primaryPath"), head, receipt.get("retainedRef"))
+    inactive_lease()
+    return {**evidence, **verified, "provider": "repository-managed-reconciliation",
+            "cleanup": cleanup_proof, "manager": manager_proof,
+            "artifact": {"path": str(Path(artifact["path"]).resolve()), "sha256": actual_digest, "bytes": after.st_size},
+            "completed_at": cleanup["completed_at"], "verified_at": stamp()}
 
 
 def closeout(thread, workspace, disposition, reason, evidence, retirement_receipt=None):
@@ -319,7 +432,7 @@ def closeout(thread, workspace, disposition, reason, evidence, retirement_receip
         try:
             root = str(workspace_root(workspace))
         except FileNotFoundError as exc:
-            raise ValueError("Checkout is absent; supply --retirement-receipt with its successful Groundskeeper removal JSON") from exc
+            raise ValueError("Checkout is absent; supply --retirement-receipt with verified Groundskeeper or managed retirement JSON") from exc
     if len(reason.strip()) < 12 or not evidence.strip():
         raise ValueError("Closeout needs a concrete reason and an evidence reference")
     with ledger(thread) as data:
@@ -457,7 +570,7 @@ def cli(argv=None):
             p.add_argument("--disposition", choices=["cleaned", "retained", "active"], required=True)
             p.add_argument("--reason", required=True)
             p.add_argument("--evidence", required=True)
-            p.add_argument("--retirement-receipt", help="Successful applied Groundskeeper retirement JSON for an already removed checkout")
+            p.add_argument("--retirement-receipt", help="Applied Groundskeeper retirement JSON or pinned managed-snapshot reconciliation JSON for an already removed checkout")
     args = parser.parse_args(argv)
     if args.command == "register":
         result = register(args.thread, args.workspace, args.purpose, args.growth_limit_mib)
