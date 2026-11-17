@@ -684,6 +684,48 @@ test('valuable ignored log, lock, and generated-name files are not silently disc
   ]);
 });
 
+test('large ignored directories preserve unique files without overflowing the argument stack', async (t) => {
+  const fixture = createFixture();
+  const linked = path.join(fixture.parent, 'wide-ignored');
+  const ignoredName = 'retained-state';
+  fs.writeFileSync(path.join(fixture.repo, '.gitignore'), `${ignoredName}/\n`);
+  git(fixture.repo, ['add', '.gitignore']);
+  git(fixture.repo, ['commit', '-m', 'ignore local retained state']);
+  git(fixture.repo, ['worktree', 'add', '-b', 'feature/wide-ignored', linked, 'main']);
+  const ignoredRoot = path.join(linked, ignoredName);
+  const referenceRoot = path.join(fixture.repo, ignoredName);
+  fs.mkdirSync(ignoredRoot);
+  fs.writeFileSync(path.join(ignoredRoot, 'sentinel'), 'fixture\n');
+
+  // Virtualize only this directory: exercise the real scan and comparison path
+  // without creating 150,000 files or retaining a large on-disk fixture.
+  const fileCount = 150_000;
+  const entryMethods = { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
+  const entries = Array.from({ length: fileCount }, (_, index) => ({ ...entryMethods, name: `file-${index}.txt` }));
+  entries.push({ ...entryMethods, name: 'unique-notes.txt' });
+  const readdir = fs.readdirSync;
+  const lstat = fs.lstatSync;
+  const stat = fs.statSync;
+  const read = fs.readFileSync;
+  const isVirtual = (value) => typeof value === 'string'
+    && (value.startsWith(`${ignoredRoot}${path.sep}`) || value.startsWith(`${referenceRoot}${path.sep}`));
+  const fileStat = { isSymbolicLink: () => false, isFile: () => true, isDirectory: () => false };
+  t.mock.method(fs, 'readdirSync', (value, ...args) => value === ignoredRoot ? entries : readdir(value, ...args));
+  t.mock.method(fs, 'lstatSync', (value, ...args) => isVirtual(value) ? fileStat : lstat(value, ...args));
+  t.mock.method(fs, 'statSync', (value, ...args) => isVirtual(value) ? fileStat : stat(value, ...args));
+  t.mock.method(fs, 'readFileSync', (value, ...args) => {
+    if (!isVirtual(value)) return read(value, ...args);
+    return Buffer.from(value === path.join(ignoredRoot, 'unique-notes.txt') ? 'unique local notes\n' : 'shared\n');
+  });
+
+  const report = await scanRoots([fixture.parent], { maxDepth: 4, concurrency: 1, prCheck: false });
+  const repo = report.repos.find((candidate) => candidate.primaryPath === fixture.repo);
+  const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
+  assert.deepEqual(worktree.preciousIgnored, [`${ignoredName}/unique-notes.txt`]);
+  assert.deepEqual(worktree.inspectionErrors, []);
+  assert.equal(repo.worktrees.length, 2);
+});
+
 test('distinct invalid UTF-8 ignored files cannot compare equal through replacement characters', async () => {
   const fixture = createFixture();
   const linked = path.join(fixture.parent, 'binary-ignored');

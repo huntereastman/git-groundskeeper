@@ -2071,9 +2071,11 @@ async function inspectPreciousIgnored(cwd, primaryPath, ignoredContentPolicy) {
     }
     if (isRepoRegenerableIgnoredPath(cwd, candidate)) continue;
     const expanded = expandIgnoredCandidate(cwd, candidate);
-    files.push(...expanded.files);
-    reviewDirectories.push(...expanded.reviewDirectories);
-    errors.push(...expanded.errors);
+    // Ignored trees can exceed the engine's function-argument limit. Keep all
+    // evidence without spreading a directory's entire contents into one call.
+    for (const file of expanded.files) files.push(file);
+    for (const directory of expanded.reviewDirectories) reviewDirectories.push(directory);
+    for (const error of expanded.errors) errors.push(error);
   }
 
   const precious = [];
