@@ -59,10 +59,13 @@ misleading whole-scan percentage.
 
 Discovery yields periodically so the display keeps moving even while mapping a
 large filesystem. Because the dashboard stays on stderr, stdout remains safe to
-pipe or parse as JSON. `--progress` forces an escape-free milestone log when
+pipe or parse as JSON. `--progress` forces escape-free live counts when
 stderr is not interactive, `--no-progress` disables progress, and `--no-color`
 keeps the dashboard monochrome.
-Forced pipe progress prefixes each milestone with `inventory=roots,repositories,worktrees`;
+Forced pipe progress coalesces count updates to at most one per 100 ms within
+each phase, flushing the latest real count at phase changes and completion.
+It does not wait for percentage or directory-count milestones. Each update is
+prefixed with `inventory=roots,repositories,worktrees`;
 counts not known yet appear as `-`. This lets an embedding app show the live
 inventory without mistaking phase progress for a final total.
 
@@ -73,7 +76,7 @@ the current phase and phase-local progress rather than serving as a decorative
 loading loop, and recomposes itself as the terminal is resized. Spatial mode
 uses the terminal's alternate screen, then restores the original screen and
 cursor before printing the final report. The flag implies `--progress`;
-redirected stderr still receives only the restrained, escape-free milestone
+redirected stderr still receives only the restrained, escape-free count
 log.
 
 For a sharper, graphic alternative, pass `--signal-progress`. It opens the

@@ -471,7 +471,7 @@ test('the indeterminate spatial scene animates without percentage leakage', () =
   assert.doesNotMatch(first, /\d+(?:\.\d+)?%/);
 });
 
-test('forced progress in a pipe is milestone-based plain text', () => {
+test('forced progress in a pipe is time-bounded plain text', () => {
   const stream = new MemoryStream({ isTTY: false, columns: 80 });
   let now = 0;
   const reporter = createProgressReporter(
@@ -496,6 +496,91 @@ test('forced progress in a pipe is milestone-based plain text', () => {
   assert.match(stream.output, /Scanning worktrees \[##############################\] 100\/100/);
   assert.match(stream.output, /OK FOREST MAPPED/);
   assert.ok(stream.output.split('\n').filter(Boolean).length < 12, 'plain progress became a per-item log');
+});
+
+for (const [phase, label] of [
+  ['resolve', 'Resolving repositories'],
+  ['ownership', 'Reading repository ownership'],
+  ['worktrees', 'Scanning worktrees'],
+  ['analysis', 'Analyzing repositories'],
+]) {
+  test(`pipe progress reports real ${phase} counts within the same quarter`, () => {
+    const { reporter, stream, advance, pendingTimers } = plainReporterClock();
+    reporter.update({ phase, label, completed: 0, total: 547 });
+    reporter.update({ phase, label, completed: 1, total: 547 });
+    advance(100);
+    assert.match(stream.output, /\] 1\/547\n/);
+    reporter.update({ phase, label, completed: 2, total: 547 });
+    advance(100);
+    assert.match(stream.output, /\] 2\/547\n/);
+    assert.equal(pendingTimers(), 0);
+    reporter.dispose();
+  });
+}
+
+test('pipe discovery counts update below the old 250-directory milestone', () => {
+  const { reporter, stream, advance } = plainReporterClock();
+  reporter.update(discoveryEvent(0, 0));
+  reporter.update(discoveryEvent(1, 1));
+  advance(100);
+  assert.match(stream.output, /Discovering repositories · 1 dirs · 1 repos/);
+  reporter.update(discoveryEvent(2, 1));
+  advance(100);
+  assert.match(stream.output, /Discovering repositories · 2 dirs · 1 repos/);
+  reporter.dispose();
+});
+
+test('pipe bursts coalesce to the latest actual count without idle or invented updates', () => {
+  const { reporter, stream, advance, pendingTimers } = plainReporterClock();
+  reporter.update({ phase: 'worktrees', label: 'Scanning worktrees', completed: 0, total: 547 });
+  for (let completed = 1; completed <= 136; completed += 1) {
+    reporter.update({
+      phase: 'worktrees', label: 'Scanning worktrees', completed, total: 547,
+      inventoryRoots: 2, inventoryRepositories: 203, inventoryWorktrees: 343,
+    });
+  }
+  assert.equal(stream.output.trim().split('\n').length, 1);
+  assert.equal(pendingTimers(), 1);
+  advance(100);
+  assert.equal(stream.output.trim().split('\n').length, 2);
+  assert.match(stream.output, /inventory=2,203,343 \| Scanning worktrees .* 136\/547\n/);
+  assert.doesNotMatch(stream.output, /137\/547/);
+  const settled = stream.output;
+  advance(10_000);
+  assert.equal(stream.output, settled);
+  assert.equal(pendingTimers(), 0);
+  reporter.dispose();
+});
+
+test('pipe progress flushes phase boundaries and completion without a late timer', () => {
+  const { reporter, stream, advance, pendingTimers } = plainReporterClock();
+  reporter.update({ phase: 'worktrees', label: 'Scanning worktrees', completed: 0, total: 547 });
+  reporter.update({ phase: 'worktrees', label: 'Scanning worktrees', completed: 546, total: 547 });
+  reporter.update({ phase: 'analysis', label: 'Analyzing repositories', completed: 0, total: 5 });
+  assert.match(stream.output, /546\/547\nAnalyzing repositories .* 0\/5\n/);
+  reporter.update({ phase: 'analysis', label: 'Analyzing repositories', completed: 1, total: 5 });
+  reporter.update({ phase: 'complete', label: 'Scan complete', completed: 5, total: 5 });
+  assert.match(stream.output, /1\/5\nOK FOREST MAPPED/);
+  assert.equal(pendingTimers(), 0);
+  const finished = stream.output;
+  advance(100);
+  assert.equal(stream.output, finished);
+  reporter.dispose();
+});
+
+test('pipe progress publishes a completed phase immediately and flushes on disposal', () => {
+  const { reporter, stream, advance, pendingTimers } = plainReporterClock();
+  reporter.update({ phase: 'resolve', label: 'Resolving repositories', completed: 0, total: 2 });
+  reporter.update({ phase: 'resolve', label: 'Resolving repositories', completed: 2, total: 2 });
+  assert.match(stream.output, /2\/2\n/);
+  reporter.update(discoveryEvent(1, 1));
+  reporter.update(discoveryEvent(2, 1));
+  reporter.dispose();
+  assert.match(stream.output, /2 dirs · 1 repos\n$/);
+  assert.equal(pendingTimers(), 0);
+  const disposed = stream.output;
+  advance(100);
+  assert.equal(stream.output, disposed);
 });
 
 test('forced pipe progress carries live inventory totals without inventing unavailable counts', () => {
@@ -927,6 +1012,38 @@ test('a termination signal exits the 3D alternate screen before cleanup', () => 
   assert.equal(stream.listenerCount('resize'), 0);
   assert.equal(signals.listenerCount('SIGTERM'), 0);
 });
+
+function plainReporterClock() {
+  const stream = new MemoryStream({ isTTY: false, columns: 160 });
+  let now = 0;
+  const timers = new Map();
+  const reporter = createProgressReporter(
+    { progress: 'always', color: 'never', json: false },
+    stream,
+    {
+      now: () => now,
+      env: {},
+      setTimeout(callback, delay) {
+        const handle = { unref() {} };
+        timers.set(handle, { callback, due: now + delay });
+        return handle;
+      },
+      clearTimeout(handle) { timers.delete(handle); },
+    },
+  );
+  return {
+    reporter, stream,
+    pendingTimers: () => timers.size,
+    advance(milliseconds) {
+      now += milliseconds;
+      for (const [handle, { callback, due }] of [...timers]) {
+        if (due > now) continue;
+        timers.delete(handle);
+        callback();
+      }
+    },
+  };
+}
 
 function sampleState() {
   let state = createProgressState(0);

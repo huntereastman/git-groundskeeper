@@ -350,6 +350,8 @@ export function createProgressReporter(options, stream = process.stderr, runtime
   const now = runtime.now ?? Date.now;
   const schedule = runtime.setInterval ?? setInterval;
   const unschedule = runtime.clearInterval ?? clearInterval;
+  const schedulePlain = runtime.setTimeout ?? setTimeout;
+  const unschedulePlain = runtime.clearTimeout ?? clearTimeout;
   const signalSource = runtime.signalSource ?? process;
   let state = createProgressState(now());
   let timer = null;
@@ -358,7 +360,11 @@ export function createProgressReporter(options, stream = process.stderr, runtime
   let alternateScreen = false;
   let disposed = false;
   let streamFailed = false;
-  const plainMilestones = new Set();
+  let plainTimer = null;
+  let pendingPlainEvent = null;
+  let plainPhase = null;
+  let lastPlainLine = null;
+  let lastPlainWriteAt = -Infinity;
   const signalHandlers = new Map();
 
   function safeWrite(value) {
@@ -425,6 +431,44 @@ export function createProgressReporter(options, stream = process.stderr, runtime
     timer = null;
   }
 
+  function stopPlainTimer() {
+    if (plainTimer === null) return;
+    unschedulePlain(plainTimer);
+    plainTimer = null;
+  }
+
+  function flushPlainProgress() {
+    stopPlainTimer();
+    const event = pendingPlainEvent;
+    pendingPlainEvent = null;
+    if (!event || disposed || streamFailed) return;
+    const line = renderPlainProgressLine(event, stream.columns ?? 100);
+    if (line === lastPlainLine) return;
+    if (safeWrite(`${line}\n`)) {
+      lastPlainLine = line;
+      lastPlainWriteAt = now();
+    }
+  }
+
+  function updatePlainProgress(event) {
+    const phaseChanged = event.phase !== plainPhase;
+    if (phaseChanged) flushPlainProgress();
+    plainPhase = event.phase;
+    pendingPlainEvent = event;
+    const phaseComplete = Number.isInteger(event.completed)
+      && Number.isInteger(event.total) && event.completed === event.total;
+    const delay = TICK_MS - (now() - lastPlainWriteAt);
+    // Reaper consumes this pipe. Coalesce bursts by time, never by percentage
+    // or item-count milestones, and flush the latest real count even if the
+    // next worktree takes a long time to finish.
+    if (phaseChanged || phaseComplete || delay <= 0) {
+      flushPlainProgress();
+    } else if (plainTimer === null) {
+      plainTimer = schedulePlain(flushPlainProgress, delay);
+      plainTimer?.unref?.();
+    }
+  }
+
   function restoreCursor() {
     if (!cursorHidden) return '';
     cursorHidden = false;
@@ -433,6 +477,8 @@ export function createProgressReporter(options, stream = process.stderr, runtime
 
   function clear() {
     stopTimer();
+    stopPlainTimer();
+    pendingPlainEvent = null;
     const leave = alternateScreen ? LEAVE_ALT_SCREEN : '';
     alternateScreen = false;
     const output = immersive
@@ -443,6 +489,7 @@ export function createProgressReporter(options, stream = process.stderr, runtime
   }
 
   function finish(event) {
+    flushPlainProgress();
     state = reduceProgressEvent(state, event, now());
     stopTimer();
     if (interactive) {
@@ -457,8 +504,10 @@ export function createProgressReporter(options, stream = process.stderr, runtime
     } else {
       safeWrite(`${renderInventoryPrefix(event)}${renderCompletionSummary(state, { color, unicode: false })}\n`);
     }
-    // A reporter is reused by `watch`; milestones belong to one scan cycle.
-    plainMilestones.clear();
+    // A reporter is reused by `watch`; each scan starts with fresh counts.
+    plainPhase = null;
+    lastPlainLine = null;
+    lastPlainWriteAt = -Infinity;
   }
 
   function update(rawEvent) {
@@ -476,10 +525,7 @@ export function createProgressReporter(options, stream = process.stderr, runtime
       return;
     }
 
-    const milestone = plainMilestone(event);
-    if (plainMilestones.has(milestone)) return;
-    plainMilestones.add(milestone);
-    safeWrite(`${renderPlainProgressLine(event, stream.columns ?? 100)}\n`);
+    updatePlainProgress(event);
   }
 
   function removeLifecycleHandlers() {
@@ -494,6 +540,7 @@ export function createProgressReporter(options, stream = process.stderr, runtime
 
   function dispose() {
     if (disposed) return;
+    flushPlainProgress();
     clear();
     disposed = true;
     removeLifecycleHandlers();
@@ -506,6 +553,8 @@ export function createProgressReporter(options, stream = process.stderr, runtime
   function streamErrorHandler() {
     streamFailed = true;
     stopTimer();
+    stopPlainTimer();
+    pendingPlainEvent = null;
   }
 
   function resizeHandler() {
@@ -941,16 +990,6 @@ function normalizeEvent(event) {
     ...event,
     phase: LEGACY_PHASES.get(event.phase) ?? event.phase,
   };
-}
-
-function plainMilestone(event) {
-  if (!Number.isInteger(event.completed) || !Number.isInteger(event.total) || event.total === 0) {
-    if (event.phase === 'discovery' && Number.isInteger(event.visitedDirectories)) {
-      return `${event.phase}:${Math.floor(event.visitedDirectories / 250)}`;
-    }
-    return `${event.phase}:start`;
-  }
-  return `${event.phase}:${Math.floor((event.completed / event.total) * 4)}`;
 }
 
 function eraseLines(count) {
