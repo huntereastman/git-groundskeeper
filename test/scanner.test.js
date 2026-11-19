@@ -477,6 +477,10 @@ test('repo-aware rules hide only caches proven by local tool manifests', async (
   git(fixture.repo, ['add', '.gitignore', 'Cargo.toml', 'Package.swift', 'global.json', 'pubspec.yaml', 'android', 'astro-site', 'frontend', 'functions', 'infra', 'ios', 'php', 'plain-site']);
   git(fixture.repo, ['commit', '-m', 'add tool manifests']);
   git(fixture.repo, ['worktree', 'add', '-b', 'feature/repo-aware-caches', linked, 'main']);
+  // Even a matching project binding in the main checkout should be visible.
+  fs.mkdirSync(path.join(fixture.repo, 'functions', '.vercel'), { recursive: true });
+  fs.writeFileSync(path.join(fixture.repo, 'functions', '.vercel', 'project.json'),
+    'fixture for functions/.vercel/project.json\n');
 
   const ignoredFiles = [
     ['.build', 'checkouts', 'dependency.txt'],
@@ -489,6 +493,8 @@ test('repo-aware rules hide only caches proven by local tool manifests', async (
     ['functions', '.next', 'cache.bin'],
     ['functions', '.turbo', 'cache.bin'],
     ['functions', '.vercel', 'project.json'],
+    ['functions', '.vercel', '.env.production.local'],
+    ['functions', '.vercel', 'output', 'static', 'index.html'],
     ['functions', 'lib', 'generated.js'],
     ['functions', 'node_modules', 'dependency', 'index.js'],
     ['frontend', 'dist', 'index.html'],
@@ -514,7 +520,10 @@ test('repo-aware rules hide only caches proven by local tool manifests', async (
   const worktree = repo.worktrees.find((candidate) => candidate.path === linked);
 
   assert.equal(worktree.dirty, false);
-  assert.deepEqual(worktree.preciousIgnored, ['assets/.env', 'build/', 'plain-site/dist/']);
+  assert.deepEqual(new Set(worktree.preciousIgnored), new Set([
+    'assets/.env', 'build/', 'plain-site/dist/',
+    'functions/.vercel/.env.production.local', 'functions/.vercel/project.json', 'functions/.vercel/output/',
+  ]));
   assert.equal(worktree.tier, 'check-first');
 });
 

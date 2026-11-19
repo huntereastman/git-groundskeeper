@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { git, mustGit } from './git.js';
+import { createGeneratedArtifactClassifier } from './generated-artifacts.js';
 import { inspectLivePrimaryBranch, inspectDefaultBranchContainment } from './default-branch.js';
 import {
   listMergedPullRequestBranches,
@@ -1636,7 +1637,6 @@ const COARSE_IGNORED_DIRECTORIES = new Set([
   '.next',
   '.terraform',
   '.turbo',
-  '.vercel',
   'DerivedData',
   'Pods',
   'bin',
@@ -2062,6 +2062,7 @@ async function inspectPreciousIgnored(cwd, primaryPath, ignoredContentPolicy) {
   const reviewDirectories = [];
   const policyIgnored = new Map();
   const errors = [];
+  const isGeneratedArtifact = createGeneratedArtifactClassifier(cwd);
 
   for (const candidate of candidates) {
     const policyRule = matchIgnoredContentPolicy(ignoredContentPolicy, candidate);
@@ -2093,7 +2094,13 @@ async function inspectPreciousIgnored(cwd, primaryPath, ignoredContentPolicy) {
       recordPolicyIgnored(policyIgnored, filePath, policyRule);
       continue;
     }
+    if (isVercelConfiguration(filePath)) {
+      // Report the name without opening deployment configuration or environment files.
+      precious.push(filePath);
+      continue;
+    }
     if (isRepoRegenerableIgnoredPath(cwd, filePath)) continue;
+    if (isGeneratedArtifact(filePath)) continue;
     if (REGENERABLE_IGNORED.some((pattern) => pattern.test(filePath))) continue;
     const comparison = compareIgnoredFile(
       path.join(cwd, filePath),
@@ -2363,13 +2370,13 @@ function isRepoRegenerableIgnoredPath(cwd, relativePath) {
     .join('/')
     .replace(/\/$/, '');
   const segments = normalized.split('/').filter(Boolean);
+  if (segments.includes('.vercel')) return false;
 
   if (toolDirectoryHasMarker(cwd, segments, '.dart_tool', ['pubspec.yaml'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, '.dotnet', ['global.json'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, 'node_modules', ['package.json'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, '.next', ['package.json'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, '.turbo', ['package.json'])) return true;
-  if (toolDirectoryHasMarker(cwd, segments, '.vercel', ['package.json'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, 'Pods', ['Podfile'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, '.build', ['Package.swift'])) return true;
   if (toolDirectoryHasMarker(cwd, segments, 'target', ['Cargo.toml'])) return true;
@@ -2532,6 +2539,10 @@ function hasMarkerAtOrAbove(cwd, directorySegments, markerName) {
   return false;
 }
 
+function isVercelConfiguration(relativePath) {
+  return /(?:^|\/)\.vercel\/(?:project\.json|repo\.json|\.env(?:\.[^/]*)?)$/.test(relativePath);
+}
+
 function expandIgnoredCandidate(cwd, candidate) {
   const files = [];
   const reviewDirectories = [];
@@ -2556,7 +2567,10 @@ function expandIgnoredCandidate(cwd, candidate) {
     }
 
     // A symlink is a pointer: removing the worktree leaves its target intact.
-    if (stat.isSymbolicLink()) return;
+    if (stat.isSymbolicLink()) {
+      if (isVercelConfiguration(currentRelative)) files.push(currentRelative);
+      return;
+    }
     if (stat.isFile()) {
       files.push(currentRelative);
       return;
@@ -2565,7 +2579,10 @@ function expandIgnoredCandidate(cwd, candidate) {
       errors.push(`${currentRelative}: unsupported ignored filesystem entry`);
       return;
     }
-    if (COARSE_IGNORED_DIRECTORIES.has(path.basename(currentRelative))) {
+    // Vercel metadata is small. Keep potentially large build/cache trees folded
+    // while showing sibling configuration files by their exact paths.
+    if (COARSE_IGNORED_DIRECTORIES.has(path.basename(currentRelative)) ||
+        /(?:^|\/)\.vercel\/(?:output|cache)$/.test(currentRelative)) {
       reviewDirectories.push(`${currentRelative}/`);
       return;
     }
